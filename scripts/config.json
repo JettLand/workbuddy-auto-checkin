@@ -1,0 +1,47 @@
+{
+  "api_base": "https://copilot.tencent.com/v2",
+  "checkin_paths": [
+    "/billing/meter/daily-checkin"
+  ],
+  "checkin_status_paths": [
+    "/billing/meter/checkin-activity-status",
+    "/billing/meter/checkin-status"
+  ],
+  "auth_headers": {
+    "X-Domain": "www.workbuddy.cn",
+    "Content-Type": "application/json"
+  },
+  "token_exprs": [
+    "window.__GENIE_DEFAULT_APP_PROVIDERS__ && window.__GENIE_DEFAULT_APP_PROVIDERS__.auth && typeof window.__GENIE_DEFAULT_APP_PROVIDERS__.auth.getToken === 'function' ? await window.__GENIE_DEFAULT_APP_PROVIDERS__.auth.getToken() : null",
+    "window.__GENIE_DEFAULT_APP_PROVIDERS__ && window.__GENIE_DEFAULT_APP_PROVIDERS__.auth && typeof window.__GENIE_DEFAULT_APP_PROVIDERS__.auth.getAccessToken === 'function' ? await window.__GENIE_DEFAULT_APP_PROVIDERS__.auth.getAccessToken() : null"
+  ],
+  "uid_expr": "window.__genieAccountService && window.__genieAccountService.account && window.__genieAccountService.account.uid || null",
+  "domain_expr": "window.__genieAccountService && window.__genieAccountService.account && window.__genieAccountService.account.domain || null",
+  "default_uid": "",
+  "default_domain": "www.workbuddy.cn",
+  "asar_candidates": [],
+  "workbuddy_exe_path": "",
+  "workbuddy_asar_path": "",
+  "last_calibrated_client_version": "5.3.14",
+  "feature_removed": false,
+  "passive_capture_seconds": 60,
+  "token_file_names": [
+    "workbuddy-desktop.info",
+    "Tencent-Cloud.coding-copilot.info"
+  ],
+  "cdp_fallback_allowed": false,
+  "token_dpapi_enabled": true,
+  "token_file_paths": [],
+  "notify": {
+    "webhook_url": "",
+    "on": {
+      "success": true,
+      "already": false,
+      "error": true
+    }
+  },
+  "retry_max_attempts": 10,
+  "retry_delay_min_sec": 60,
+  "retry_delay_max_sec": 600,
+  "retry_total_sec": 3600
+}
