@@ -4,6 +4,16 @@
 
 ---
 
+## [2.4.1] — 2026-08-31
+
+**死代码清理（等价替换，无能力变更）**
+
+- `scripts/wbcommon.py`：删除零引用的真死代码——未使用的 `import hashlib`，以及仅定义、从未被调用的 `read_pending_cdp_consent` / `clear_pending_cdp_consent` / `read_pending_user_decision` 三个待决标记读写函数（实际被调用的是 `write_pending_cdp_consent` / `write_pending_user_decision` / `clear_pending_user_decision`，均保留）。
+- `SKILL.md` frontmatter 补 `target_platform: windows` 与 `target_agent: workbuddy` 声明（消除 portability 误报，上轮已落地，本次随版本号固化）。
+- 本次为补丁号变动（等价替换，未新增能力维度），仅 `doc` 检查器审计通过。
+
+---
+
 ## [2.4.0] — 2026-08-31
 
 **弹性化收尾 + 私有仓库发布就绪**

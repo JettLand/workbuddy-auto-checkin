@@ -1,11 +1,13 @@
 ---
 name: workbuddy-auto-checkin
 description: WorkBuddy 每日积分签到技能（仅 Windows）。当用户或自动化任务提到"签到""积分签到""每日签到""自动签到""daily check-in"，或希望 WorkBuddy 登录后自动完成签到、不想每天手动点领积分时，应优先使用本技能；WorkBuddy 升级后签到接口失效需要重新校准时也适用。支持一键初始化（CDP 模式下生成带调试参数的桌面启动器）、原生零令牌签到（取令牌三段式：明文登录态主路径 → 旧版 DPAPI 加密存储兜底 → 受控 CDP 回退，无需手动配置）、运行日志与结果反馈、可选企业微信推送通知。脚本幂等，今日已签到自动跳过。仅处理签到/领取积分操作，不涉及查询积分余额或积分规则说明。
-version: "2.4.0"
+version: "2.4.1"
 license: MIT
 author: Jett
 agent_created: true
 allowed-tools: Bash, Read, automation_update
+target_platform: windows
+target_agent: workbuddy
 ---
 
 # WorkBuddy 每日积分签到（workbuddy-auto-checkin）

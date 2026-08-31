@@ -15,7 +15,6 @@ wbcommon.py —— workbuddy-auto-checkin 公共核心模块（零第三方依�
 """
 
 import base64
-import hashlib
 import json
 import os
 import socket
@@ -401,24 +400,6 @@ def write_pending_cdp_consent(reason=""):
         return False
 
 
-def read_pending_cdp_consent():
-    """读取今日待决的 CDP 回退请求（跨日自动失效）。"""
-    p = _marker_path("pending_cdp_consent")
-    if not os.path.isfile(p):
-        return None
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def clear_pending_cdp_consent():
-    try:
-        os.remove(_marker_path("pending_cdp_consent"))
-        return True
-    except Exception:
-        return False
 
 
 def write_pending_user_decision(reason="", attempts=0, last_exit_code=None):
@@ -441,16 +422,6 @@ def write_pending_user_decision(reason="", attempts=0, last_exit_code=None):
     except Exception:
         return False
 
-
-def read_pending_user_decision():
-    p = _marker_path("pending_user_decision")
-    if not os.path.isfile(p):
-        return None
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
 
 
 def clear_pending_user_decision():
