@@ -4,6 +4,21 @@
 
 ---
 
+## [3.1.0] — 2026-11-13
+
+**结构性变更：冻结边界重划——exe 改为薄引导器，界面/业务/凭证全部外置；路径全程动态推导**
+
+- **动因**：阁主指出「每次改动都要重打包 exe，是否壳仍不够薄」。取证显示 v3.0.0 落地后连续多轮改动（托盘回调、控制台输出、Exit 关窗、00:05 定时、宿主窗口隐藏、菜单中文化、悬浮提示、`NIM_DELETE`）**100% 落在 `tray_host.py`**，而 `payload.py` + `wbcredential.py` 业务功能零改动；但打包入口恰是壳本身，导致唯一在变的代码被冻进 13 MB exe，热替换机制留给的却是从未变过的代码。**「薄」不是行数问题，是冻结粒度问题**。
+- **方案 A 引导器**：新增 `host/boot.py`（十余行），冻结态取 `sys.executable` 目录、源码态取 `__file__` 目录，以 `runpy.run_path` 加载同目录 `tray_host.py`；`tray_host.py` 277 行**一字未改**（其 `_base()` 本就用 `sys.executable`/`__file__`，`payload.py` 本就用自身 `__file__` 并 `sys.path.insert`，两条路径机制独立于 PyInstaller 的 `sys.path`）。PyInstaller 入口由 `host/tray_host.py` 改为 `host/boot.py`，`dist/` 由 3 文件变 **4 文件契约**（exe + `tray_host.py` + `payload.py` + `wbcredential.py`）。此后**任何业务或界面改动只需替换对应 `.py`，不再重打包 exe**。
+- **补充要求：路径动态推导**（阁主）：源码不含任何绝对目录；`boot.py` 增加缺文件诊断（退出码 2 + 中文提示 + 打印当前程序目录），避免搬迁后静默失败。新增**迁移实测**：四文件整体复制到含空格与非 ASCII 的全新目录 `迁移 测试 目录 v1`，启动、托盘注册、签到 POST 全部正常，日志只落在新目录（不回写原 `dist`），且 exe 的 sha256 与原目录完全一致。
+- **静态探针测不出的运行时缺口（治本）**：首次冒烟「零日志、无任何报错」，用带硬超时的文件重定向探针捕获控制台，得到 `ModuleNotFoundError: No module named 'ctypes.wintypes'`（进程 8 秒内退出码 1）。根因＝PyInstaller 只静态分析入口 `boot.py`，外置脚本运行时才 `import` 的模块**不会被自动收集**；这也修正了施工前「`tray_host.py` 一字不动即可」的判断——壳代码确实不用改，但打包命令必须补齐依赖。修复为打包命令显式列出三份外置脚本的全部 `--hidden-import`（`ctypes.wintypes`、`urllib.request`、`urllib.error`、`json`、`base64`、`hashlib`、`re`、`subprocess`、`threading`、`datetime`、`runpy`）并保留 `--hidden-import=websocket --hidden-import=cryptography --collect-all=cryptography`。**此缺口不能靠改外置 `.py` 修复，属构建期配置**。
+- **验证**（四类冒烟全绿 `RESULT: PASS`）：① 功能等价——`host.log` 出现 `tray_add=1 v4=1`，`daemon.log` 出现 `daemon started` → 签到 POST 400/10001 → `startup trigger -> already (server confirmed)` → `next run at 2026-11-14T00:05:00`，控制台无 `ModuleNotFoundError`/`Traceback`；② 热替换——临时副本只改 `tray_host.py` 注入标记、exe 的 sha256 不变，重启后日志出现标记且签到正常；③ 迁移——见上，含空格与非 ASCII 目录全部通过；④ 缺文件诊断——只放 exe 时退出码 2、中文提示与动态程序目录均正确。四轮均无残留进程。
+- **打包命令诊断坑**：捕获 exe 控制台输出时不可用 `stdout=PIPE` 后无条件 `read()`——常驻进程的消息循环不退出会永久阻塞（本会话曾因此中断）；须用文件重定向 + 限时 `poll()` + 主动 `taskkill /T /F`。控制台 stderr 在重定向到文件时按系统代码页 GBK 编码，判读中文提示须以 GBK 解码。
+- **文档对齐**：`SKILL.md` 升 3.1.0、架构表改为引导器 + 全外置、补 4 文件契约/路径动态推导/依赖显式冻结三条硬约束；`README.md` 架构树、打包命令（入口与完整 `--hidden-import` 清单）、快速开始、排障表、文件结构同步；部署目录 SKILL.md 同步；次版本变动按约定跑双基线全量审计。
+- **边界**：exe 仍绑定 Python 依赖集合——若外置脚本将来引入**新的第三方库**，需重打包一次以冻结该库；仅调用已冻结标准库/已收集依赖的代码改动不受影响。`host/dist/` 为 gitignored 构筑产物，异机部署须按 README 重打包引导器 exe（或用同一 exe + 三份 `.py`）。
+
+---
+
 ## [3.0.0] — 2026-11-12
 
 **破坏性变更：执行体重建，v2.x 明文链路整体废弃**
@@ -22,6 +37,9 @@
 - **第四轮验证**：虚拟时钟单元探针实测 `next_run_at()` 五个时刻均精确指向下一个 `00:05:00`、`startup` 一次 + `schedule` 三次严格间隔 24h、日志无 `00:04:59`；退出子进程探针实测退出码 0、`FreeConsole` 真调用、控制台窗口销毁；打包后 exe 冒烟 `daemon started → checkin ... -> 400 → startup trigger -> already (server confirmed) → next run at 2026-11-13T00:05:00`，`tray_add=1 v4=1`，无残留进程。
 - **第五轮报障修复（缩小到托盘）**：真机日志显示 `cmd=2` 已命中并打印 `minimized to tray`，但窗口只是最小化、并未隐藏。取证发现本机默认终端为 Windows Terminal：`GetConsoleWindow()` 返回的是 0×0 的 `PseudoConsoleWindow` 伪窗口（owner 为 `CASCADIA_HOSTING_WINDOW_CLASS` 宿主窗口），`SW_HIDE` 只作用在不可见伪窗口上，用户真正看到的宿主窗口不受影响；同时 `_watch()` 检测伪窗口的 `IsIconic` 恒为 false，「手动最小化自动隐藏」也从未生效。修复为新增 `_visible_window()`，用 `GetAncestor(c, GA_ROOTOWNER)` 沿 owner 链定位可见窗口，`_restore` / `_minimize` / `_watch` 统一改用它；传统 conhost 下 `GetConsoleWindow()` 自身即顶层窗口，行为不变。属纯壳改动，按约定重打包 exe，托盘诊断日志增记目标窗口句柄。
 - **第五轮验证**：独立控制台探针实测 `GetAncestor` 定位到 `CASCADIA_HOSTING_WINDOW_CLASS`（rect 70,78–1199,713）；调用真实 `_minimize()` 后该窗口 `visible=false / iconic=false`（真隐藏而非最小化），`_restore()` 后 `visible=true`；把宿主窗口最小化后 `_visible_window()` 报告 `iconic=true`，`_watch` 判定生效。打包后 exe 冒烟 `tray_add=1 v4=1`、`startup trigger -> already (server confirmed)`、`next run at 2026-11-13T00:05:00`，无残留进程。托盘菜单点选仍以真机复测为准。
+- **界面中文化与悬浮提示治本（2026-11-13）**：托盘右键三项改为中文「还原窗口」/「缩小到托盘」/「退出程序」；图标提示由 `WorkBuddy Checkin` 改为中文程序名 `WorkBuddy 自动签到`。取证发现提示此前不显示的根因**不是缺文字**——壳设 `NOTIFYICON_VERSION_4` 后标准 tooltip 默认被抑制（微软文档：v4 下须指定 `NIF_SHOWTIP` 才显示 `szTip`），原 `uFlags` 只有 `NIF_ICON|NIF_MESSAGE|NIF_TIP`；补 `NIF_SHOWTIP`(0x80) 后 `uFlags=135`。属纯壳改动，按约定重打包 exe；三文档菜单名与提示文本同步为中文。
+- **本轮验证**：中文菜单文本经 `AppendMenuW` → `GetMenuStringW` 宽字符往返无损；结构探针确认 `NIF_SHOWTIP` 位与 `szTip` 中文读回正确；新 exe 冒烟 `tray_add=1 v4=1`、`startup trigger -> already (server confirmed)`、`next run at 2026-11-14T00:05:00`、无残留进程。真机日志另证实 `2026-11-13T00:05:01 schedule trigger -> ok`（每日 00:05 兜底实签到成功）。悬浮显示与菜单文案以真机复测为准。
+- **托盘删除常量隐患治本（2026-11-13）**：上轮收尾时按精准修改原则报备的 `tray_host.py` 常量 `NIM_DELETE = 1` 已修正为官方值 `2`。微软 `Shell_NotifyIconW` 定义为 `NIM_ADD=0` / `NIM_MODIFY=1` / `NIM_DELETE=2` / `NIM_SETVERSION=4`；旧值 1 使退出分支实际向 Shell 发出「修改图标」而非「删除图标」，因紧随 `FreeConsole()` + `os._exit(0)`，图标随进程终止而消失，用户侧看不出异常，但退出路径从未真正注销图标，属潜在幽灵图标隐患。**验证**：真实 Shell 往返对照探针——旧值组 `modify(1)=True` 后紧接真 `delete(2)=True`（图标仍在，证明未删除）；新值组 `delete(2)=True` 且二次 `delete(2)=False`（证明首次已真删），`RESULT: PASS`。属纯壳改动，按约定重打包 exe；新 exe 冒烟 `tray_add=1 v4=1`、`startup trigger -> already (server confirmed)`、`next run at 2026-11-14T00:05:00`、无残留进程。
 - **文档对齐**：`SKILL.md` / `README.md` 重写为 v3.0.0 架构并同步部署目录；主版本变动按约定跑全量审计。
 - **边界**：DPAPI 绑定当前 Windows 用户（防其他用户/离线磁盘，**不防同一用户下的恶意进程**）；令牌到期或 at-rest 密钥轮换后，需客户端运行并登录一次刷新登录态与缓存。
 

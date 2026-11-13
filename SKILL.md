@@ -1,7 +1,7 @@
 ---
 name: workbuddy-auto-checkin
 description: WorkBuddy 每日积分签到（仅 Windows）。当用户提到"签到""积分签到""每日签到""自动签到""daily check-in"，或询问签到为何失效、如何部署后台常驻签到、如何排查鉴权失败时使用本技能，提供现行执行体的部署、配置与排障指引。自 v3.0.0 起实际签到由独立后台常驻程序执行，不再由本技能脚本或 WorkBuddy 自动化任务触发；旧 scripts/ 链路已废弃，仅作诊断溯源。
-version: "3.0.0"
+version: "3.1.0"
 license: MIT
 author: Jett
 agent_created: true
@@ -18,19 +18,29 @@ target_agent: workbuddy
 
 | 组成 | 文件 | 作用 |
 |---|---|---|
-| 纯界面壳 | `tray_host.py` → 打包为 `wb-checkin-host.exe` | 命令提示符窗口 + 系统托盘图标；右键菜单 Restore 还原窗口 / Minimize to tray 缩小到托盘 / Exit 释放控制台并终止进程；最小化窗口亦自动隐藏 |
-| 业务脚本 | `payload.py` | 启动即强制发一轮签到请求，另于每日 00:05 执行一次常驻兜底（唯一时点）；定时轮次先做状态预检幂等；POST 结果与运行信息同步输出到控制台与日志 |
-| 凭证模块 | `wbcredential.py` | 双路取令牌 + Windows 数据保护接口缓存派生密钥，实现完全离线自足 |
+| 引导器 | `boot.py` → 打包为 `wb-checkin-host.exe` | 仅十余行：运行时动态定位自身所在目录，以 `runpy` 加载同目录 `tray_host.py`；不含界面、业务或任何写死路径 |
+| 界面壳 | `tray_host.py`（外置） | 命令提示符窗口 + 系统托盘图标（悬浮显示程序名 `WorkBuddy 自动签到`）；右键菜单「还原窗口」/「缩小到托盘」/「退出程序」；最小化窗口亦自动隐藏至托盘；再以 `runpy` 加载同目录 `payload.py` |
+| 业务脚本 | `payload.py`（外置） | 启动即强制发一轮签到请求，另于每日 00:05 执行一次常驻兜底（唯一时点）；定时轮次先做状态预检幂等；POST 结果与运行信息同步输出到控制台与日志 |
+| 凭证模块 | `wbcredential.py`（外置） | 双路取令牌 + Windows 数据保护接口缓存派生密钥，实现完全离线自足 |
 
-- 壳为**纯界面框架**，不含任何业务逻辑与业务文本，仅保留必要的界面标识（菜单项名称与托盘图标提示）；启动时以 `runpy` 运行时加载同目录 `payload.py`。**业务功能变更只需替换 `.py`，不需重新打包 exe**；仅改壳才需重打包。
-- exe 必须与 `payload.py`、`wbcredential.py` 同目录。运行信息同步写入 exe 同目录下的业务日志与托盘诊断日志（运行态产物，首次运行时生成）。
+- **exe 只冻结引导器**：界面、业务、凭证三份 `.py` 全部外置，由 `runpy` 运行时加载。**任何业务或界面改动只需替换对应 `.py`，不再需要重新打包 exe**；仅当 `boot.py` 自身或 Python 依赖集合变化时才重打包。
+- **4 文件交付契约**：exe 与 `tray_host.py`、`payload.py`、`wbcredential.py` 必须同目录，缺一即启动失败（退出码 2 并打印中文诊断，列出当前程序目录）。运行信息写入 exe 同目录的 `logs/` 下（运行态产物，首次运行时生成）。
+- **路径全程动态推导**：`boot.py` 与壳的 `_base()` 均取 `sys.executable`（冻结态）或 `__file__`（源码态）的目录，`payload.py` 取自身 `__file__` 目录，凭证与配置取 `expanduser("~")` / `LOCALAPPDATA` 并支持环境变量覆盖；**源码不含任何绝对目录**。`dist/` 四文件可整体改名或搬迁到任意路径（含空格与非 ASCII 目录），日志随新目录生成，无需重装或重打包。
+- **依赖须在打包时显式冻结**：PyInstaller 只静态分析入口 `boot.py`，外置脚本运行时才 `import` 的模块不会被自动收集；打包命令必须带完整 `--hidden-import` 清单（尤其 `ctypes.wintypes`、`urllib.request`、`urllib.error`）与 `--collect-all=cryptography`。漏配时表现为 exe 秒退、退出码 1、零日志、控制台 `ModuleNotFoundError`。
 - 配置默认读技能安装目录 `scripts` 子目录下的 `config.json`，可用环境变量 `WB_CHECKIN_CONFIG` 覆盖。
+
+**引导器退出码契约**（独立后台程序的引导器；签到结果不按退出码分级）：
+
+| 退出码 | 场景 |
+|---|---|
+| `1` | 依赖冻结缺失等启动异常（PyInstaller 抛 `ModuleNotFoundError`）；亦为历史 `scripts/` 链路的失败码 |
+| `2` | 缺同目录 `tray_host.py`：仅 `host/` 独立后台程序返回；技能安装副本已移除 `host/`，不返回该码 |
 
 ### 快速开始
 
 1. 确认本机 WorkBuddy 曾正确登录过一次（用于建立登录态与密钥缓存）。
-2. 运行 `wb-checkin-host.exe`；控制台出现 `daemon started` → `checkin ... -> 400 ...` → `startup trigger -> ...` → `next run at 次日 00:05:00` 即正常。**每次启动都会真正发出一次签到请求**：当日尚未签到时服务端返回 200；已签到时返回 HTTP 400 且业务码 10001（服务端明确答复「今日已签」），日志记为 `already (server confirmed)`，不视为失败。此后仅在每日 00:05 兜底一轮，不再于其他时点触发。
-3. 最小化窗口，或右键选 Minimize to tray，即隐藏到托盘；右键选 Restore 可还原，选 Exit 会关闭命令提示符窗口并终止进程。Windows 11 常把新图标收进「隐藏的图标」溢出面板，可点任务栏 `^` 展开后找到带 `WorkBuddy Checkin` 提示的图标；如需常驻显示，把它拖到任务栏即可。
+2. 确认 exe 与 `tray_host.py`、`payload.py`、`wbcredential.py` 四个文件在同一目录（该目录可任意改名或搬迁）。运行 `wb-checkin-host.exe`；控制台出现 `daemon started` → `checkin ... -> 400 ...` → `startup trigger -> ...` → `next run at 次日 00:05:00` 即正常。**每次启动都会真正发出一次签到请求**：当日尚未签到时服务端返回 200；已签到时返回 HTTP 400 且业务码 10001（服务端明确答复「今日已签」），日志记为 `already (server confirmed)`，不视为失败。此后仅在每日 00:05 兜底一轮，不再于其他时点触发。
+3. 最小化窗口，或右键选「缩小到托盘」，即隐藏到托盘；右键选「还原窗口」可还原，选「退出程序」会关闭命令提示符窗口并终止进程。鼠标悬浮托盘图标会显示程序名 `WorkBuddy 自动签到`。Windows 11 常把新图标收进「隐藏的图标」溢出面板，可点任务栏 `^` 展开后找到带该提示的图标；如需常驻显示，把它拖到任务栏即可。
 
 无需调试端口、无需桌面快捷方式、无需 WorkBuddy 自动化任务。平台侧现存自动化仅 `00:05` 一条且处于暂停态，不参与签到。
 
@@ -62,10 +72,15 @@ target_agent: workbuddy
 
 | 现象 | 处置 |
 |---|---|
+| exe 启动后秒退、退出码 1、两份日志均无新增 | 引导器模式的依赖收集缺口：PyInstaller 只静态分析入口 `boot.py`，外置脚本运行时才加载的模块未冻结。捕获控制台可见 `ModuleNotFoundError`（典型为 `ctypes.wintypes`）。重打包时须补 `--hidden-import=ctypes.wintypes --hidden-import=urllib.request --hidden-import=urllib.error` 等完整清单与 `--collect-all=cryptography`；**改外置 `.py` 不能修此问题** |
+| 搬迁目录后无法启动，或提示缺文件 | 四文件必须同目录；程序按 `sys.executable`（冻结态）/ `__file__` 动态推导，源码无写死路径。仅复制 exe 会退出码 2 并列出当前程序目录；切勿在代码或打包命令里写死绝对目录 |
+| 日志或配置仍写到旧目录 | 日志取 exe 同目录、配置取用户目录，均与源码位置无关；确认运行的是新目录中的 exe，且旧实例已结束 |
 | 控制台无运行信息 | 确认 `payload.py` 与 exe 同目录且未损坏；运行信息由该脚本输出，壳本身不含业务文本 |
-| 托盘右键无菜单 | 先确认点的是带 `WorkBuddy Checkin` 提示的图标（Windows 11 新图标默认在溢出面板）；壳须以真实顶层窗口注册图标、置 `NIF_MESSAGE` 回调标志、设 `NOTIFYICON_VERSION_4`，并同时处理自定义回调与直接投递的 `WM_CONTEXTMENU` / `WM_RBUTTONUP`；查托盘诊断日志是否出现消息码、菜单项数量与命令返回值 |
-| 选 Minimize to tray 后窗口只是最小化、未隐藏 | 壳须沿 `GetAncestor(GetConsoleWindow(), GA_ROOTOWNER)` 的 owner 链定位可见窗口再执行 `SW_HIDE`。若默认终端是 Windows Terminal，`GetConsoleWindow()` 只返回 0×0 的 `PseudoConsoleWindow` 伪窗口，隐藏它不影响用户看到的 `CASCADIA_HOSTING_WINDOW_CLASS` 宿主窗口；托盘诊断日志应出现 `minimized to tray hwnd=`，且「手动最小化自动隐藏」须检测同一宿主窗口 |
-| 选 Exit 后图标消失但窗口仍在 | 退出分支须显式 `FreeConsole()` 释放控制台并 `os._exit(0)` 终止进程；仅删托盘图标与销毁隐藏工具窗口不会关闭由 conhost 持有的命令提示符窗口。托盘诊断日志应出现 `exit requested` → `releasing console, exiting process` |
+| 托盘右键无菜单 | 先确认点的是带 `WorkBuddy 自动签到` 提示的图标（Windows 11 新图标默认在溢出面板）；壳须以真实顶层窗口注册图标、置 `NIF_MESSAGE` 回调标志、设 `NOTIFYICON_VERSION_4`，并同时处理自定义回调与直接投递的 `WM_CONTEXTMENU` / `WM_RBUTTONUP`；查托盘诊断日志是否出现消息码、菜单项数量与命令返回值 |
+| 鼠标悬浮图标不显示程序名 | 壳设 `NOTIFYICON_VERSION_4` 后标准 tooltip 默认被抑制，`uFlags` 必须带 `NIF_SHOWTIP`（0x80）才会显示 `szTip`，仅设 `NIF_TIP` 不够；提示文本为 `WorkBuddy 自动签到` |
+| 选「缩小到托盘」后窗口只是最小化、未隐藏 | 壳须沿 `GetAncestor(GetConsoleWindow(), GA_ROOTOWNER)` 的 owner 链定位可见窗口再执行 `SW_HIDE`。若默认终端是 Windows Terminal，`GetConsoleWindow()` 只返回 0×0 的 `PseudoConsoleWindow` 伪窗口，隐藏它不影响用户看到的 `CASCADIA_HOSTING_WINDOW_CLASS` 宿主窗口；托盘诊断日志应出现 `minimized to tray hwnd=`，且「手动最小化自动隐藏」须检测同一宿主窗口 |
+| 选「退出程序」后图标消失但窗口仍在 | 退出分支须显式 `FreeConsole()` 释放控制台并 `os._exit(0)` 终止进程；仅删托盘图标与销毁隐藏工具窗口不会关闭由 conhost 持有的命令提示符窗口。托盘诊断日志应出现 `exit requested` → `releasing console, exiting process` |
+| 退出后通知区残留失效图标（鼠标划过才消失） | 壳退出分支的 `NIM_DELETE` 必须为官方值 `2`（`Shell_NotifyIconW`：`0`=ADD / `1`=MODIFY / `2`=DELETE / `4`=SETVERSION）。曾误写为 `1`，实际只发「修改图标」而从未注销图标，此前被后续 `os._exit(0)` 掩盖 |
 | 到点未签到或触发时点不符 | 定时点为 `SCHEDULE` 唯一项 00:05；`next_run_at()` 返回绝对时刻，`next run at` 日志须精确到 `T00:05:00`。若曾出现每 6 小时触发或 `00:04:59`，说明用了 `min(秒数, 6h)` 截断或浮点秒数反推时刻，均为旧缺陷 |
 | `startup trigger -> already (server confirmed)` | 正常：启动已发出签到请求，服务端确认今日已签。每日积分由服务端按日幂等发放，同日重复启动不会重复计分 |
 | `... trigger -> auth_failed` | 令牌过期或密钥已轮换；运行并登录一次 WorkBuddy 客户端刷新登录态与缓存 |
@@ -76,7 +91,7 @@ target_agent: workbuddy
 
 ## 五、历史链路（v2.4.1 及之前，已废弃）
 
-旧执行体（技能安装目录 `scripts` 子目录下的签到主脚本）采用「明文登录态主路径 → 旧版 DPAPI 加密存储兜底 → 受控 CDP 回退」三段式取令牌，配合 `calibrate.py` 的 asar 主动扫描自愈、`--retry` 任务级重试、退出码分级与两条单时点自动化。该链路因客户端加密改造**已不具备签到能力**，源码仅保留供诊断溯源，**不要按旧版命令执行签到**。旧日志中出现的退出码 `1` 表示鉴权失效或请求失败，其余分级仅属历史行为，详见 CHANGELOG；**v3.0.0 后台程序不使用退出码分级**，结果以控制台与日志输出为准。
+旧执行体（技能安装目录 `scripts` 子目录下的签到主脚本）采用「明文登录态主路径 → 旧版 DPAPI 加密存储兜底 → 受控 CDP 回退」三段式取令牌，配合 `calibrate.py` 的 asar 主动扫描自愈、`--retry` 任务级重试、退出码分级与两条单时点自动化。该链路因客户端加密改造**已不具备签到能力**，源码仅保留供诊断溯源，**不要按旧版命令执行签到**。旧日志中出现的退出码 `1` 表示鉴权失效或请求失败，其余分级仅属历史行为，详见 CHANGELOG；**v3.0.0 后台程序的签到结果不使用退出码分级**（引导器仅在缺少外置脚本时以退出码 2 报错），结果以控制台与日志输出为准。
 
 仍跨版本有效的定论：
 
@@ -84,7 +99,7 @@ target_agent: workbuddy
 - asar 扫描须用 mmap 配合 `mm.find()`（多字节子串 `in` 判断在 mmap 上恒为假）。
 - 端点发现不致误判：`feature_removed` 不自动持久化，需人工在 `config.json` 置 `true`。
 
-配套回归技能 `workbuddy-auto-checkin-verify` v1.2.1 仅覆盖上述历史链路，其前置条件（明文登录态可读）在新客户端已失效，**不适用于 v3.0.0 执行体**。
+配套回归技能 `workbuddy-auto-checkin-verify` v1.2.1 仅覆盖上述历史链路，其前置条件（明文登录态可读）在新客户端已失效，**不适用于 v3.x 后台常驻执行体**。
 
 ## 六、合规说明
 

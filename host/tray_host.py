@@ -49,11 +49,12 @@ WM_LBUTTONDBLCLK = 0x203
 WM_CONTEXTMENU = 0x7B
 WM_NULL = 0
 NIM_ADD = 0
-NIM_DELETE = 1
+NIM_DELETE = 2
 NIM_SETVERSION = 4
 NIF_MESSAGE = 1
 NIF_ICON = 2
 NIF_TIP = 4
+NIF_SHOWTIP = 0x80
 NOTIFYICON_VERSION_4 = 4
 PM_REMOVE = 1
 WS_POPUP = 0x80000000
@@ -132,9 +133,9 @@ def _watch():
 
 def _menu(hwnd):
     m = U.CreatePopupMenu()
-    U.AppendMenuW(m, MF_STRING, 1, "Restore")
-    U.AppendMenuW(m, MF_STRING, 2, "Minimize to tray")
-    U.AppendMenuW(m, MF_STRING, 3, "Exit")
+    U.AppendMenuW(m, MF_STRING, 1, "还原窗口")
+    U.AppendMenuW(m, MF_STRING, 2, "缩小到托盘")
+    U.AppendMenuW(m, MF_STRING, 3, "退出程序")
     items = U.GetMenuItemCount(m)
     pt = w.POINT()
     U.GetCursorPos(ctypes.byref(pt))
@@ -244,10 +245,10 @@ def main():
     nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
     nid.hWnd = hwnd
     nid.uID = 1
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP
     nid.uCallbackMessage = CB_MSG
     nid.hIcon = U.LoadIconW(None, IDI_APPLICATION)
-    nid.szTip = "WorkBuddy Checkin"
+    nid.szTip = "WorkBuddy 自动签到"
     _state["nid"] = nid
     added = S.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
     nid.uVersion = NOTIFYICON_VERSION_4
