@@ -19,6 +19,8 @@ CDP_PORT_FILE = os.path.join(HOME, ".workbuddy", "app", "session",
                              "DevToolsActivePort")
 CONFIG_FILE = os.environ.get("WB_CHECKIN_CONFIG") or os.path.join(
     HOME, ".workbuddy", "skills", "workbuddy-auto-checkin", "scripts", "config.json")
+CACHE_FILE = os.environ.get("WB_CHECKIN_KEYCACHE") or os.path.join(
+    LOCAL, "WorkBuddyCheckin", "keycache.json")
 
 _k = ctypes.WinDLL("kernel32", use_last_error=True)
 _k.OpenProcess.restype = w.HANDLE
@@ -27,6 +29,21 @@ _k.ReadProcessMemory.argtypes = [w.HANDLE, ctypes.c_void_p, ctypes.c_void_p,
                                  ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
 _k.VirtualQueryEx.argtypes = [w.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
 _k.CloseHandle.argtypes = [w.HANDLE]
+_k.LocalFree.argtypes = [ctypes.c_void_p]
+_c = ctypes.WinDLL("crypt32", use_last_error=True)
+
+
+class _BLOB(ctypes.Structure):
+    _fields_ = [("cbData", w.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+
+_PROTECT_ARGS = [ctypes.POINTER(_BLOB), w.LPCWSTR, ctypes.c_void_p,
+                 ctypes.c_void_p, ctypes.c_void_p, w.DWORD,
+                 ctypes.POINTER(_BLOB)]
+_c.CryptProtectData.restype = w.BOOL
+_c.CryptProtectData.argtypes = _PROTECT_ARGS
+_c.CryptUnprotectData.restype = w.BOOL
+_c.CryptUnprotectData.argtypes = _PROTECT_ARGS
 
 
 class _MBI(ctypes.Structure):
@@ -73,7 +90,59 @@ def _key_id(key):
     return hashlib.sha256(key).hexdigest()[:16]
 
 
-def _find_key(key_id):
+def _protect(raw):
+    buf = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+    src = _BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)))
+    out = _BLOB()
+    if not _c.CryptProtectData(ctypes.byref(src), u"WBCheckinKey", None, None,
+                               None, 0, ctypes.byref(out)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return bytes(bytearray(out.pbData[:out.cbData]))
+    finally:
+        _k.LocalFree(out.pbData)
+
+
+def _unprotect(raw):
+    buf = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+    src = _BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)))
+    out = _BLOB()
+    if not _c.CryptUnprotectData(ctypes.byref(src), None, None, None, None, 0,
+                                 ctypes.byref(out)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return bytes(bytearray(out.pbData[:out.cbData]))
+    finally:
+        _k.LocalFree(out.pbData)
+
+
+def _load_key(key_id):
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if obj.get("keyId") != key_id:
+            return None
+        key = _unprotect(base64.b64decode(obj["protected"]))
+        if len(key) != 32 or _key_id(key) != key_id:
+            return None
+        return key
+    except Exception:
+        return None
+
+
+def _save_key(key_id, key):
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        blob = base64.b64encode(_protect(key)).decode("ascii")
+        tmp = CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"keyId": key_id, "protected": blob}, f)
+        os.replace(tmp, CACHE_FILE)
+    except Exception:
+        pass
+
+
+def _scan_processes(key_id):
     for pid in _pids():
         h = _k.OpenProcess(0x0410, False, pid)
         if not h:
@@ -105,6 +174,16 @@ def _find_key(key_id):
         finally:
             _k.CloseHandle(h)
     return None
+
+
+def _find_key(key_id):
+    key = _load_key(key_id)
+    if key is not None:
+        return key
+    key = _scan_processes(key_id)
+    if key is not None:
+        _save_key(key_id, key)
+    return key
 
 
 def _aad(key_id):
@@ -145,7 +224,7 @@ def route_a():
     key_id = _envelope(auth["accessToken"])["keyId"]
     key = _find_key(key_id)
     if key is None:
-        raise RuntimeError("未能从客户端进程自动调取 at-rest 密钥（需客户端已登录且在运行）")
+        raise RuntimeError("未能取得 at-rest 密钥（需客户端曾登录并运行过一次以建立 DPAPI 缓存）")
     token = _decrypt(auth["accessToken"], key)
     uid = (obj.get("account") or {}).get("uid") or ""
     domain = auth.get("domain") or "www.workbuddy.cn"
