@@ -29,6 +29,11 @@ def device_token(cfg):
 
     客户端 11-20 升级后签到活动日历按设备令牌事后校验，无令牌的签到
     会"当场受理但不入日历"。addon 路径与 channelId 走配置，源码不落盘路径。
+
+    参数对齐客户端实态（2026-11-23 内存取证）：客户端实时令牌为单段
+    v3 令牌（无设备信息附加段），后台刷新通道 includesOutdatedMessage
+    为 false，故 includesDeviceInfo:false + includesOutdatedMessage:false，
+    产出与客户端同构同世代（长度随世代 683~699 漂移，属正常时效编码）。
     """
     addon = (os.environ.get("WB_CHECKIN_TURING_ADDON")
              or cfg.get("turing_addon_dir") or "").strip()
@@ -38,7 +43,7 @@ def device_token(cfg):
         "const b=require(%r);"
         "b.configure(%d,%r,%r);"
         "b.fetchDeviceToken({usingCachedMessage:true,"
-        "includesOutdatedMessage:true,includesDeviceInfo:true,timeoutMs:15000})"
+        "includesOutdatedMessage:false,includesDeviceInfo:false,timeoutMs:15000})"
         ".then(t=>console.log(t),"
         "e=>{console.error(e&&(e.codeName||e.message));process.exit(1)})"
     ) % (addon, int(cfg.get("turing_channel_id") or 109144),
