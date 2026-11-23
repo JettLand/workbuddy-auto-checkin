@@ -58,6 +58,10 @@ NIF_TIP = 4
 NIF_INFO = 0x10
 NIF_SHOWTIP = 0x80
 NIIF_WARNING = 2
+MB_ICONWARNING = 0x30
+MB_SYSTEMMODAL = 0x1000
+MB_TOPMOST = 0x40000
+MB_SETFOREGROUND = 0x10000
 NOTIFYICON_VERSION_4 = 4
 PM_REMOVE = 1
 WS_POPUP = 0x80000000
@@ -122,16 +126,26 @@ def _minimize():
 
 
 def _notify(title, text):
-    """托盘气泡告警；NIM_MODIFY + NIF_INFO 只更新气球字段，不动图标注册。"""
+    """缺卡告警双通道：托盘气泡（约 10 秒自消）+ 置顶模态弹窗（不点不消失）。
+
+    NIM_MODIFY + NIF_INFO 只更新气球字段，不动图标注册；弹窗阻塞
+    payload 线程直到点击——00:05 后本无其他任务，无实际影响。
+    """
     nid = _state["nid"]
-    if not nid:
-        return
-    nid.uFlags = NIF_INFO
-    nid.dwInfoFlags = NIIF_WARNING
-    nid.szInfoTitle = title[:63]
-    nid.szInfo = text[:255]
-    S.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+    if nid:
+        nid.uFlags = NIF_INFO
+        nid.dwInfoFlags = NIIF_WARNING
+        nid.szInfoTitle = title[:63]
+        nid.szInfo = text[:255]
+        S.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
     _host_log("balloon title=%s text=%s" % (title[:20], text[:40]))
+    try:
+        U.MessageBoxW(None, text[:1024], title[:63],
+                      MB_ICONWARNING | MB_SYSTEMMODAL | MB_TOPMOST
+                      | MB_SETFOREGROUND)
+        _host_log("alert box dismissed")
+    except Exception as e:
+        _host_log("alert box failed: %r" % (e,))
 
 
 def _payload():
