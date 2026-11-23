@@ -50,11 +50,14 @@ WM_CONTEXTMENU = 0x7B
 WM_NULL = 0
 NIM_ADD = 0
 NIM_DELETE = 2
+NIM_MODIFY = 1
 NIM_SETVERSION = 4
 NIF_MESSAGE = 1
 NIF_ICON = 2
 NIF_TIP = 4
+NIF_INFO = 0x10
 NIF_SHOWTIP = 0x80
+NIIF_WARNING = 2
 NOTIFYICON_VERSION_4 = 4
 PM_REMOVE = 1
 WS_POPUP = 0x80000000
@@ -118,10 +121,24 @@ def _minimize():
         _host_log("minimized to tray hwnd=%s" % c)
 
 
+def _notify(title, text):
+    """托盘气泡告警；NIM_MODIFY + NIF_INFO 只更新气球字段，不动图标注册。"""
+    nid = _state["nid"]
+    if not nid:
+        return
+    nid.uFlags = NIF_INFO
+    nid.dwInfoFlags = NIIF_WARNING
+    nid.szInfoTitle = title[:63]
+    nid.szInfo = text[:255]
+    S.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+    _host_log("balloon title=%s text=%s" % (title[:20], text[:40]))
+
+
 def _payload():
     p = os.path.join(_base(), "payload.py")
     if os.path.isfile(p):
-        runpy.run_path(p, run_name="__main__")
+        runpy.run_path(p, run_name="__main__",
+                       init_globals={"_tray_notify": _notify})
 
 
 def _watch():

@@ -4,6 +4,19 @@
 
 ---
 
+## [3.2.0] — 2026-11-23
+
+**设备令牌直发 + 缺卡复核告警；项目脱技能化，收敛为纯后台常驻程序**
+
+- **缺卡根因取证（21/22 显示成功但实际缺卡）**：真机日志证实两日 00:05 签到均 `200 OK` 且 `streak_days` 连续递增（50→51→52），程序侧无任何异常；但服务端活动日历（`checkin-activity-status`，真实状态源）缺这两日。asar 取证发现客户端 2026-11-20 升级（asar 修改时间 11-20 09:09）引入图灵盾设备风控：签到请求须附 `X-Device-Token`（由 `TuringShieldSDK.dll` / N-API 扩展 `turing_sdk.node` 在客户端 main 进程生成），无令牌的签到被服务端「**当场受理、事后不计**」——返回 200 与积分、`streak` 照常递增，但不写入活动日历。程序此前从未附带该头，与缺卡时间线完全吻合（另一先例 11-08）。阁主使用补签卡回填后状态已恢复（streak 53 连续）。
+- **设备令牌直发（方案 A）**：本地用系统 Node（v22）直接加载客户端自带的 N-API 扩展（`native/turing-sdk`，`index.cjs` 入口），`configure(channelId, productName, productVersion)` 后 `fetchDeviceToken({usingCachedMessage, includesOutdatedMessage, includesDeviceInfo, timeoutMs})` 独立产出令牌——约 2 秒、**不依赖客户端进程运行**。参数取证：`channelId=109144`、`productName="WorkBuddy"`、`productVersion="5.11.3"`（来源 `app.asar.unpacked/cli/product.json` 的 `turingSdk` 段）。同族形态验证：本地令牌 `v3:` 前缀与客户端进程内存中扫描到的缓存令牌一致（本地 1174 字符 / 客户端 695 字符，差异为 SDK 内部 message 缓存世代，同一 DLL 同一参数）。三组只读对照（无头 / 本地令牌 / 客户端令牌）调 `checkin-activity-status` 响应完全一致——服务端对该端点无即时校验，令牌有效性只能由签到后活动日历复核判定。`payload.py` 新增 `device_token()`（addon 目录与通道参数走 `config.json` 的 `turing_*` 字段 + `WB_CHECKIN_TURING_ADDON` 环境变量覆盖；node 缺失 / 目录缺失 / 产令牌失败时安全退化为无令牌直发并记日志），签到 POST 经 `checkin_headers()` 附 `X-Device-Token`。
+- **缺卡复核告警（方案 C）**：`payload.py` 新增 `verify_checkin()`——签到轮次（`ok` 或 `already (server confirmed)`）后查询 `checkin-activity-status`（`checkin-status` 为假状态不可用），今日不在 `today_checked_in=true` 或 `checkin_dates` 时隔 8 秒重试一次再判定，宁可迟报不漏报；仍缺卡则经壳注入的 `_tray_notify`（`NIM_MODIFY + NIF_INFO + NIIF_WARNING` 托盘气泡，不动图标注册）弹出中文告警提醒补签，并记 `verify -> MISSING` 日志。
+- **脱技能化（阁主裁定）**：项目已由「技能 + 后台程序」收敛为**纯后台常驻程序**——① `git rm` 删除 `SKILL.md` 与 `scripts/`（v2.x 历史链路共 10 文件，git 历史可溯），清理仓库根级 v2 时代 `logs/`、`state/` 运行态残留；② 卸载两处部署副本（`skills/workbuddy-auto-checkin` 351K 与已死的 `workbuddy-auto-checkin-verify` 24K）；③ **配置链路自足化**（卸载前置，否则程序断粮）：`wbcredential.py` 的 `CONFIG_FILE` 由「技能安装目录 `scripts/config.json`」改为「程序同目录 `config.json`」（`WB_CHECKIN_CONFIG` 环境变量覆盖，动态推导），`config.json` 由 `scripts/` 迁至 `host/` 作为源真值并复制进 `dist/`，交付契约 **4 文件 → 5 文件**；④ `boot.py` 缺失文件检查扩为四项（`tray_host.py`、`payload.py`、`wbcredential.py`、`config.json`，退出码 2 + 中文清单诊断），按约定重打包 exe（打包命令补 `--hidden-import=ctypes --hidden-import=shutil --hidden-import=time`，覆盖 payload 新增 `import shutil` 等运行时依赖）。
+- **自足性实证（卸载后冒烟 `RESULT: PASS`）**：部署副本删除后的机器上直接启动 exe——`device token ready len=1174` → 签到 POST 400/10001 → `startup trigger -> already (server confirmed)` → `verify -> ok (in activity calendar)` → `next run at 2026-11-24T00:05:00`，无残留进程；缺文件诊断：仅复制 exe 时退出码 2、中文提示完整列出四个缺失文件与动态程序目录。
+- **边界**：本地令牌有效性尚未经「明日 00:05 实签 → 次日活动日历入账」闭环验证（服务端为事后判定模式）；若令牌被判无效，行为等同 v3.1.0（当场受理但缺卡），此时复核告警会第一时间弹泡提示补签，不会静默缺卡。`turing_addon_dir` 指向客户端安装目录，客户端升级若变更该路径或 SDK 版本，需同步 `config.json` 的 `turing_product_version`。
+
+---
+
 ## [3.1.0] — 2026-11-13
 
 **结构性变更：冻结边界重划——exe 改为薄引导器，界面/业务/凭证全部外置；路径全程动态推导**

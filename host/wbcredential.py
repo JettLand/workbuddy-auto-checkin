@@ -17,8 +17,9 @@ AUTH_FILE = os.path.join(LOCAL, "CodeBuddyExtension", "Data", "Public", "auth",
                          "workbuddy-desktop.info")
 CDP_PORT_FILE = os.path.join(HOME, ".workbuddy", "app", "session",
                              "DevToolsActivePort")
+BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.environ.get("WB_CHECKIN_CONFIG") or os.path.join(
-    HOME, ".workbuddy", "skills", "workbuddy-auto-checkin", "scripts", "config.json")
+    BASE, "config.json")
 CACHE_FILE = os.environ.get("WB_CHECKIN_KEYCACHE") or os.path.join(
     LOCAL, "WorkBuddyCheckin", "keycache.json")
 
