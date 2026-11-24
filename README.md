@@ -17,7 +17,7 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 
 ## 特性
 
-- **独立常驻**：命令提示符窗口 + 系统托盘图标（悬浮显示程序名 `WorkBuddy 自动签到`）；最小化自动隐藏，右键菜单首项为「开机自启动」勾选项（分隔线区分；勾选时写 HKCU Run 注册表值 `WorkBuddyCheckin`，指向当前程序本体，取消即删除；切换后气泡反馈，无需管理员权限），其后为「还原窗口」/「缩小到托盘」/「退出程序」（释放控制台并终止进程，窗口随之关闭）。
+- **独立常驻**：命令提示符窗口 + 系统托盘图标（与 exe 同款统一图标：绿色圆底白色对勾，悬浮显示程序名 `WorkBuddy 自动签到`）；最小化自动隐藏，右键菜单首项为「开机自启动」勾选项（分隔线区分；勾选时写 HKCU Run 注册表值 `WorkBuddyCheckin`，指向当前程序本体，取消即删除；切换后气泡反馈，无需管理员权限），其后为「还原窗口」/「缩小到托盘」/「退出程序」（释放控制台并终止进程，窗口随之关闭）。
 - **双触发点**：每次启动立即**强制发出一次签到请求**（不做状态预检），另于每日 00:05 执行一次常驻兜底（唯一时点，先状态预检幂等）。启动轮次由服务端判定当日是否已签：HTTP 400 + 业务码 10001 记为 `already (server confirmed)`，不视为失败。
 - **凭证单通道**：自解 `$wbEncrypted` 加密信封取当前有效令牌（DPAPI 缓存 → 进程内存扫描 → AES-GCM 自解，过期硬阻断）；失败明确报错，不再静默退回过期备用令牌。原 CDP 兜底（需客户端以调试端口启动，正常部署从不成立）已于 v3.2.0 退役。
 - **完全离线自足**：派生密钥经 Windows 数据保护接口（`CryptProtectData`）按当前用户加密缓存，首次建立后客户端完全关闭也能签到。
@@ -76,10 +76,13 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 # 源码运行（需 cryptography）；boot.py 也可直接跑
 python host/payload.py
 
-# 仅当修改 boot.py 本身或 Python 依赖集合时才需重打包
+# 仅当修改 boot.py 本身、Python 依赖集合或 exe 图标资源时才需重打包
 # --hidden-import 清单必须覆盖三份外置脚本的全部运行时 import：
 # PyInstaller 只分析入口 boot.py，外置脚本的 import 不会被自动收集
+# --icon：图标字节内嵌于 tray_host.py 常量 TICON_B64（与托盘图标同源），
+# 打包前将其 base64 解码临时写为 .ico，打包后删除——磁盘不保留图片文件
 python -m PyInstaller --onefile --console --name wb-checkin-host --noconfirm \
+  --icon=<临时 icon.ico 路径> \
   --hidden-import=cryptography \
   --hidden-import=ctypes --hidden-import=ctypes.wintypes \
   --hidden-import=shutil --hidden-import=time \

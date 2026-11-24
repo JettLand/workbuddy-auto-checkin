@@ -13,6 +13,8 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import wbcredential
 
+CONFIG_FILE = os.environ.get("WB_CHECKIN_CONFIG") or os.path.join(
+    BASE, "config.json")
 LOG = os.path.join(BASE, "logs", "daemon.log")
 SCHEDULE = [(0, 5)]
 
@@ -131,10 +133,10 @@ def _turing_params(cfg):
         try:
             merged = dict(cfg)
             merged.update(params)
-            tmp = wbcredential.CONFIG_FILE + ".tmp"
+            tmp = CONFIG_FILE + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(merged, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, wbcredential.CONFIG_FILE)
+            os.replace(tmp, CONFIG_FILE)
             cfg.update(params)
             log("turing params discovered at %s -> config updated" % root)
         except OSError as e:
@@ -217,7 +219,7 @@ def post(url, token, uid, domain, headers):
 
 
 def run_once(force=False):
-    with open(wbcredential.CONFIG_FILE, "r", encoding="utf-8-sig") as f:
+    with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
         cfg = json.load(f)
     token, uid, domain = wbcredential.get_identity()
     base = (cfg.get("api_base") or "").rstrip("/")
@@ -303,7 +305,7 @@ def _run(trigger, force=False):
         result = run_once(force=force)
         log("%s trigger -> %s" % (trigger, result))
         if result in ("ok", "already (server confirmed)"):
-            with open(wbcredential.CONFIG_FILE, "r",
+            with open(CONFIG_FILE, "r",
                       encoding="utf-8-sig") as f:
                 cfg = json.load(f)
             if verify_checkin(cfg):

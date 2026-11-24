@@ -1,3 +1,4 @@
+import base64
 import ctypes
 import ctypes.wintypes as w
 import datetime
@@ -77,6 +78,12 @@ MF_SEPARATOR = 0x800
 TPM_RETURNCMD = 0x100
 TPM_RIGHTBUTTON = 2
 IDI_APPLICATION = 32512
+LR_DEFAULTCOLOR = 0
+SM_CXSMICON = 49
+SM_CYSMICON = 50
+# 统一图标（绿色圆底+白色对勾）：base64 多帧 PNG-in-ICO 字节，与 exe 资源图标
+# 同源（打包 --icon 消费同一条数据，构建时临时落盘、用后即删）。
+TICON_B64 = ("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")
 CB_MSG = 0x8001
 APP_MENU = 0x8002
 
@@ -221,6 +228,32 @@ def _autostart_toggle():
         _balloon("开机自启动", "设置失败（注册表写入被拒绝）")
 
 
+def _tray_hicon(cx, cy):
+    """从内嵌 ICO 字节选最接近目标尺寸的帧创建 HICON；失败返回 0。
+
+    ICO 容器＝6 字节 ICONDIR + N×16 字节 ICONDIRENTRY（宽、高、颜色数、
+    保留、色平面、位深、帧长、帧偏移；256 记 0）+ 各帧 PNG 数据。
+    """
+    if not TICON_B64:
+        return 0
+    raw = base64.b64decode(TICON_B64)
+    count = int.from_bytes(raw[4:6], "little")
+    best = None
+    for i in range(count):
+        e = raw[6 + 16 * i:22 + 16 * i]
+        ew = e[0] or 256
+        eh = e[1] or 256
+        score = abs(ew - cx) + abs(eh - cy)
+        if best is None or score < best[0]:
+            best = (score, int.from_bytes(e[12:16], "little"),
+                    int.from_bytes(e[8:12], "little"))
+    _, off, size = best
+    frame = raw[off:off + size]
+    buf = (ctypes.c_char * len(frame)).from_buffer_copy(frame)
+    return U.CreateIconFromResourceEx(buf, len(frame), True, 0x00030000,
+                                      cx, cy, LR_DEFAULTCOLOR)
+
+
 def _payload():
     p = os.path.join(_base(), "payload.py")
     if os.path.isfile(p):
@@ -308,6 +341,12 @@ def main():
     U.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
     U.LoadIconW.restype = w.HICON
     U.LoadIconW.argtypes = [w.HINSTANCE, ctypes.c_void_p]
+    U.CreateIconFromResourceEx.restype = w.HICON
+    U.CreateIconFromResourceEx.argtypes = [ctypes.c_void_p, w.UINT, w.BOOL,
+                                           w.DWORD, ctypes.c_int, ctypes.c_int,
+                                           w.UINT]
+    U.GetSystemMetrics.restype = ctypes.c_int
+    U.GetSystemMetrics.argtypes = [ctypes.c_int]
     U.CreatePopupMenu.restype = w.HMENU
     U.AppendMenuW.argtypes = [w.HMENU, w.UINT, ctypes.c_size_t, w.LPCWSTR]
     U.GetMenuItemCount.restype = ctypes.c_int
@@ -370,7 +409,9 @@ def main():
     nid.uID = 1
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP
     nid.uCallbackMessage = CB_MSG
-    nid.hIcon = U.LoadIconW(None, IDI_APPLICATION)
+    nid.hIcon = (_tray_hicon(U.GetSystemMetrics(SM_CXSMICON) or 16,
+                             U.GetSystemMetrics(SM_CYSMICON) or 16)
+                 or U.LoadIconW(None, IDI_APPLICATION))
     nid.szTip = "WorkBuddy 自动签到"
     _state["nid"] = nid
     added = S.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
