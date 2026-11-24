@@ -10,6 +10,7 @@ import time
 U = ctypes.WinDLL("user32", use_last_error=True)
 S = ctypes.WinDLL("shell32", use_last_error=True)
 K = ctypes.WinDLL("kernel32", use_last_error=True)
+A = ctypes.WinDLL("advapi32", use_last_error=True)
 
 LRESULT = ctypes.c_ssize_t
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
@@ -71,6 +72,8 @@ SW_HIDE = 0
 SW_RESTORE = 9
 GA_ROOTOWNER = 3
 MF_STRING = 0
+MF_CHECKED = 8
+MF_SEPARATOR = 0x800
 TPM_RETURNCMD = 0x100
 TPM_RIGHTBUTTON = 2
 IDI_APPLICATION = 32512
@@ -148,6 +151,76 @@ def _notify(title, text):
         _host_log("alert box failed: %r" % (e,))
 
 
+def _balloon(title, text):
+    """轻量气泡提示（设置类操作反馈，不弹模态窗）。"""
+    nid = _state["nid"]
+    if nid:
+        nid.uFlags = NIF_INFO
+        nid.dwInfoFlags = 0
+        nid.szInfoTitle = title[:63]
+        nid.szInfo = text[:255]
+        S.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = "WorkBuddyCheckin"
+HKEY_CURRENT_USER = 0x80000001
+KEY_QUERY_VALUE = 1
+KEY_SET_VALUE = 2
+REG_SZ = 1
+ERROR_FILE_NOT_FOUND = 2
+
+
+def _autostart_cmd():
+    """自启动命令动态推导：冻结态为 exe 本体（boot 逻辑已冻结在内）；
+    源码态为 python 调 boot.py（含缺失文件诊断）。含空格路径加引号。"""
+    if getattr(sys, "frozen", False):
+        return '"%s"' % sys.executable
+    return '"%s" "%s"' % (sys.executable, os.path.join(_base(), "boot.py"))
+
+
+def _autostart_enabled():
+    h = ctypes.c_void_p()
+    if A.RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_QUERY_VALUE,
+                       ctypes.byref(h)) != 0:
+        return False
+    try:
+        return A.RegQueryValueExW(h, RUN_VALUE, None, None, None, None) == 0
+    finally:
+        A.RegCloseKey(h)
+
+
+def _autostart_set(on):
+    h = ctypes.c_void_p()
+    rc = A.RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE,
+                         ctypes.byref(h))
+    if rc != 0:
+        raise OSError("RegOpenKeyExW rc=%d" % rc)
+    try:
+        if on:
+            data = _autostart_cmd().encode("utf-16-le") + b"\x00\x00"
+            rc = A.RegSetValueExW(h, RUN_VALUE, 0, REG_SZ, data, len(data))
+        else:
+            rc = A.RegDeleteValueW(h, RUN_VALUE)
+            if rc == ERROR_FILE_NOT_FOUND:
+                return
+        if rc != 0:
+            raise OSError("rc=%d" % rc)
+    finally:
+        A.RegCloseKey(h)
+
+
+def _autostart_toggle():
+    on = not _autostart_enabled()
+    try:
+        _autostart_set(on)
+        _host_log("autostart -> %s" % ("on" if on else "off"))
+        _balloon("开机自启动", "已开启，下次开机自动运行" if on else "已关闭")
+    except OSError as e:
+        _host_log("autostart failed: %s" % e)
+        _balloon("开机自启动", "设置失败（注册表写入被拒绝）")
+
+
 def _payload():
     p = os.path.join(_base(), "payload.py")
     if os.path.isfile(p):
@@ -164,6 +237,9 @@ def _watch():
 
 def _menu(hwnd):
     m = U.CreatePopupMenu()
+    U.AppendMenuW(m, MF_STRING | (MF_CHECKED if _autostart_enabled() else 0),
+                  4, "开机自启动")
+    U.AppendMenuW(m, MF_SEPARATOR, 0, None)
     U.AppendMenuW(m, MF_STRING, 1, "还原窗口")
     U.AppendMenuW(m, MF_STRING, 2, "缩小到托盘")
     U.AppendMenuW(m, MF_STRING, 3, "退出程序")
@@ -181,6 +257,8 @@ def _menu(hwnd):
         _restore()
     elif cmd == 2:
         _minimize()
+    elif cmd == 4:
+        _autostart_toggle()
     elif cmd == 3:
         _host_log("exit requested")
         _state["stop"].set()
@@ -260,6 +338,20 @@ def main():
     K.GetConsoleWindow.restype = w.HWND
     K.GetModuleHandleW.restype = w.HINSTANCE
     K.GetModuleHandleW.argtypes = [w.LPCWSTR]
+    A.RegOpenKeyExW.restype = ctypes.c_long
+    A.RegOpenKeyExW.argtypes = [ctypes.c_void_p, w.LPCWSTR, w.DWORD,
+                                w.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    A.RegCloseKey.restype = ctypes.c_long
+    A.RegCloseKey.argtypes = [ctypes.c_void_p]
+    A.RegQueryValueExW.restype = ctypes.c_long
+    A.RegQueryValueExW.argtypes = [ctypes.c_void_p, w.LPCWSTR, ctypes.c_void_p,
+                                   ctypes.c_void_p, ctypes.c_void_p,
+                                   ctypes.c_void_p]
+    A.RegSetValueExW.restype = ctypes.c_long
+    A.RegSetValueExW.argtypes = [ctypes.c_void_p, w.LPCWSTR, w.DWORD, w.DWORD,
+                                 ctypes.c_void_p, w.DWORD]
+    A.RegDeleteValueW.restype = ctypes.c_long
+    A.RegDeleteValueW.argtypes = [ctypes.c_void_p, w.LPCWSTR]
 
     _state["console"] = K.GetConsoleWindow()
     inst = K.GetModuleHandleW(None)
