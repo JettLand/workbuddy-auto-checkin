@@ -107,8 +107,8 @@ cp host/tray_host.py host/payload.py host/wbcredential.py host/config.json host/
 | `checkin_paths` | 签到 POST 路径候选 |
 | `checkin_status_paths` | 状态预检与复核 POST 路径候选 |
 | `auth_headers` | 附加请求头 |
-| `turing_addon_dir` | 客户端图灵 SDK N-API 扩展目录（设备令牌产出源；目录或 node 缺失则退化无令牌直发） |
-| `turing_channel_id` / `turing_product_name` / `turing_product_version` | 图灵 SDK configure 参数（取自客户端 `cli/product.json`） |
+| `turing_addon_dir` | 客户端图灵 SDK N-API 扩展目录（设备令牌产出源；目录或 node 缺失则退化无令牌直发）。**自动维护**：失效/缺失时程序从客户端安装根动态发现并写回，人工编辑仅作覆盖 |
+| `turing_channel_id` / `turing_product_name` / `turing_product_version` | 图灵 SDK configure 参数。**自动维护**：动态取自客户端安装根的 `cli/product.json`（`turingSdk.channelId` / `applicationName` / `genieVersion`），客户端升级自动跟随 |
 | `token_exprs` / `uid_expr` / `domain_expr` | 仅路 B（CDP）使用的求值表达式 |
 
 签到与状态查询均为 **POST**；状态端点用 GET 一律 404；`checkin-activity-status` 才是真实状态，`checkin-status` 返回全零假状态。定时轮次仅当明确读到 `today_checked_in=true` 时幂等跳过；`data.active` 显式为 `false` 时当日放弃。**启动触发点不做状态预检**，直接发签到请求，由服务端判定当日是否已签（HTTP 400 + 业务码 10001 为正常幂等答复）。
@@ -147,7 +147,7 @@ cp host/tray_host.py host/payload.py host/wbcredential.py host/config.json host/
 - 数据保护接口绑定当前 Windows 用户：可防其他用户与离线磁盘读取，**不防同一用户下的恶意进程**。
 - 令牌本身有服务端有效期；到期或客户端轮换 at-rest 密钥后，需客户端运行并登录一次以刷新登录态与缓存。
 - 本地设备令牌的有效性以「签到次日活动日历是否入账」为准（服务端为事后判定模式）；无论令牌是否生效，缺卡复核告警都会第一时间弹泡提示，不会静默缺卡。
-- `turing_addon_dir` 指向客户端安装目录；客户端升级若变更该路径或 SDK 版本，需同步 `config.json` 的 `turing_*` 字段。
+- 图灵盾参数（`turing_*` 字段）为缓存式自适应：配置有效直读，失效/缺失时按「配置路径上溯 → 注册表卸载登记 → 常见安装位置」动态发现并自动写回 `config.json`，全部失败则发警告弹窗（此时签到退化为无令牌直发，可能不入活动日历，由缺卡复核告警兜底）。
 - v2.x 历史链路（明文登录态 → 旧 DPAPI → CDP 回退、`--retry`、asar 自愈、退出码分级）与配套回归技能已随 v3.2.0 整体移除（git 历史可溯）。
 - 端点漂移时从客户端 `app.asar` 扫描核实新端点后更新 `config.json` 的 `checkin_paths`（原 `calibrate.py` 扫描脚本已随 v2.x 移除，git 历史可找回）。
 

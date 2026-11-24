@@ -7,6 +7,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import winreg
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -24,21 +25,155 @@ def log(msg):
     print(line, flush=True)
 
 
+def _registry_roots():
+    """从卸载登记表找 WorkBuddy 安装根（覆盖自定义安装位置）。"""
+    out = []
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for path in (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                     r"SOFTWARE\WOW6432Node\Microsoft\Windows"
+                     r"\CurrentVersion\Uninstall"):
+            try:
+                key = winreg.OpenKey(hive, path)
+            except OSError:
+                continue
+            try:
+                for i in range(winreg.QueryInfoKey(key)[0]):
+                    try:
+                        sub = winreg.OpenKey(key, winreg.EnumKey(key, i))
+                        name = winreg.QueryValueEx(sub, "DisplayName")[0]
+                        if "workbuddy" not in str(name).lower():
+                            continue
+                        try:
+                            loc = winreg.QueryValueEx(
+                                sub, "InstallLocation")[0]
+                            if loc:
+                                out.append(os.path.normpath(loc))
+                                continue
+                        except OSError:
+                            pass
+                        try:
+                            icon = winreg.QueryValueEx(
+                                sub, "DisplayIcon")[0]
+                            exe = str(icon).split(",")[0].strip().strip('"')
+                            if exe.lower().endswith(".exe"):
+                                out.append(os.path.dirname(exe))
+                        except OSError:
+                            pass
+                    except OSError:
+                        continue
+            finally:
+                winreg.CloseKey(key)
+    return out
+
+
+def _candidate_roots(cfg):
+    """客户端安装根候选（有序去重）：配置路径上溯 → 注册表 → 常见位置（环境变量拼接）。"""
+    roots = []
+    addon = (os.environ.get("WB_CHECKIN_TURING_ADDON")
+             or cfg.get("turing_addon_dir") or "").strip()
+    if addon:
+        roots.append(os.path.normpath(os.path.join(
+            os.path.dirname(os.path.normpath(addon)),
+            "..", "..", "..", "..")))
+    roots.extend(_registry_roots())
+    for env in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            roots.append(os.path.join(base, "WorkBuddy"))
+    seen, out = set(), []
+    for r in roots:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def _turing_params(cfg):
+    """缓存式自适应解析图灵盾参数，返回 (addon, channelId, name, version)。
+
+    配置有效（addon 目录存在且参数齐）→ 直读；失效/缺失 → 按候选根
+    动态发现（cli/product.json 单文件取 channelId/applicationName/
+    genieVersion，addon 同树推导）并原子写回 config.json；发现全败但
+    addon 可用时用配置值/默认值兜底直发；连 addon 都没有则发警告
+    弹窗并返回 None。
+    """
+    addon = (os.environ.get("WB_CHECKIN_TURING_ADDON")
+             or cfg.get("turing_addon_dir") or "").strip()
+    if (addon and os.path.isdir(addon)
+            and cfg.get("turing_channel_id")
+            and cfg.get("turing_product_name")
+            and cfg.get("turing_product_version")):
+        return (addon, int(cfg["turing_channel_id"]),
+                str(cfg["turing_product_name"]),
+                str(cfg["turing_product_version"]))
+    for root in _candidate_roots(cfg):
+        pj = os.path.join(root, "resources", "app.asar.unpacked",
+                          "cli", "product.json")
+        new_addon = os.path.join(root, "resources", "app.asar.unpacked",
+                                 "native", "turing-sdk")
+        if not (os.path.isfile(pj) and os.path.isdir(new_addon)):
+            continue
+        try:
+            with open(pj, "r", encoding="utf-8") as f:
+                prod = json.load(f)
+            cid = int(((prod.get("config") or {})
+                       .get("turingSdk") or {}).get("channelId") or 0)
+            name = prod.get("applicationName")
+            ver = prod.get("genieVersion")
+        except (OSError, ValueError):
+            continue
+        if not (cid and name and ver):
+            continue
+        params = {"turing_addon_dir": new_addon.replace("\\", "/"),
+                  "turing_channel_id": cid,
+                  "turing_product_name": name,
+                  "turing_product_version": ver}
+        try:
+            merged = dict(cfg)
+            merged.update(params)
+            tmp = wbcredential.CONFIG_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(merged, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, wbcredential.CONFIG_FILE)
+            cfg.update(params)
+            log("turing params discovered at %s -> config updated" % root)
+        except OSError as e:
+            log("turing config write failed: %s" % e)
+            cfg.update(params)
+        return (new_addon, cid, name, ver)
+    if addon and os.path.isdir(addon):
+        return (addon, int(cfg.get("turing_channel_id") or 109144),
+                str(cfg.get("turing_product_name") or "WorkBuddy"),
+                str(cfg.get("turing_product_version") or "5.11.3"))
+    log("turing discovery failed entirely")
+    notify = globals().get("_tray_notify")
+    if notify:
+        try:
+            notify("WorkBuddy 自动签到",
+                   "图灵盾参数自动发现失败，今日签到可能不计入活动日历，"
+                   "请检查 WorkBuddy 客户端是否已安装。")
+        except Exception as e:
+            log("turing alert ERROR %s: %s" % (type(e).__name__, e))
+    return None
+
+
 def device_token(cfg):
     """本地加载客户端图灵 SDK 产出设备令牌；不可用返回 None（退化为无令牌直发）。
 
     客户端 11-20 升级后签到活动日历按设备令牌事后校验，无令牌的签到
-    会"当场受理但不入日历"。addon 路径与 channelId 走配置，源码不落盘路径。
+    会"当场受理但不入日历"。参数走缓存式自适应（见 _turing_params）：
+    首次运行动态发现并写入 config.json，后续直读，配置失效自动重拉
+    更新，全部失败发警告弹窗——源码不含绝对路径，升级免维护。
 
     参数对齐客户端实态（2026-11-23 内存取证）：客户端实时令牌为单段
     v3 令牌（无设备信息附加段），后台刷新通道 includesOutdatedMessage
     为 false，故 includesDeviceInfo:false + includesOutdatedMessage:false，
     产出与客户端同构同世代（长度随世代 683~699 漂移，属正常时效编码）。
     """
-    addon = (os.environ.get("WB_CHECKIN_TURING_ADDON")
-             or cfg.get("turing_addon_dir") or "").strip()
-    if not addon or shutil.which("node") is None or not os.path.isdir(addon):
+    p = _turing_params(cfg)
+    if p is None or shutil.which("node") is None:
         return None
+    addon, cid, name, ver = p
     script = (
         "const b=require(%r);"
         "b.configure(%d,%r,%r);"
@@ -46,9 +181,7 @@ def device_token(cfg):
         "includesOutdatedMessage:false,includesDeviceInfo:false,timeoutMs:15000})"
         ".then(t=>console.log(t),"
         "e=>{console.error(e&&(e.codeName||e.message));process.exit(1)})"
-    ) % (addon, int(cfg.get("turing_channel_id") or 109144),
-         cfg.get("turing_product_name") or "WorkBuddy",
-         cfg.get("turing_product_version") or "5.11.3")
+    ) % (addon, cid, name, ver)
     try:
         r = subprocess.run(["node", "-e", script], capture_output=True,
                            text=True, timeout=30)
