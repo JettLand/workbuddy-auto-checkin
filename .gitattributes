@@ -1,0 +1,5 @@
+# 行尾锁定：本仓库文本文件一律 LF（工作区与入库均 LF，不受 core.autocrlf 影响）
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+.gitignore text eol=lf
