@@ -19,7 +19,7 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 
 - **独立常驻**：命令提示符窗口 + 系统托盘图标（悬浮显示程序名 `WorkBuddy 自动签到`）；最小化自动隐藏，右键菜单为「还原窗口」/「缩小到托盘」/「退出程序」（释放控制台并终止进程，窗口随之关闭）。
 - **双触发点**：每次启动立即**强制发出一次签到请求**（不做状态预检），另于每日 00:05 执行一次常驻兜底（唯一时点，先状态预检幂等）。启动轮次由服务端判定当日是否已签：HTTP 400 + 业务码 10001 记为 `already (server confirmed)`，不视为失败。
-- **双路凭证**：A 主＝自解 `$wbEncrypted` 加密信封取当前有效令牌（过期硬阻断）；B 兜底＝CDP 取令牌；双路失败明确报错，不再静默退回过期备用令牌。
+- **凭证单通道**：自解 `$wbEncrypted` 加密信封取当前有效令牌（DPAPI 缓存 → 进程内存扫描 → AES-GCM 自解，过期硬阻断）；失败明确报错，不再静默退回过期备用令牌。原 CDP 兜底（需客户端以调试端口启动，正常部署从不成立）已于 v3.2.0 退役。
 - **完全离线自足**：派生密钥经 Windows 数据保护接口（`CryptProtectData`）按当前用户加密缓存，首次建立后客户端完全关闭也能签到。
 - **设备令牌直发**：签到 POST 尽力附带本地产出的图灵盾设备令牌 `X-Device-Token`——系统 Node 直接加载客户端自带的 N-API 扩展独立产令牌（约 2 秒，不依赖客户端运行）。客户端 2026-11-20 升级后，无令牌的签到会被服务端「当场受理但不入活动日历」（缺卡成因）。令牌不可用时安全退化为无令牌直发。
 - **缺卡复核告警**：每次签到后复核活动日历（`checkin-activity-status` 真实状态源）是否真实入账，缺卡间隔重试一次仍缺则弹托盘气泡提醒补签——无论令牌是否生效都不会静默缺卡。
@@ -46,7 +46,6 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
   │     ① DPAPI 缓存命中（keyId 校验）── 客户端关闭也能用
   │     ② 未命中 → 只读扫描客户端进程内存调取 atRestSecretKey → 写缓存
   │     └─ AES-256-GCM 自解 $wbEncrypted → token / uid / domain
-  │     兜底：CDP Runtime.evaluate（需调试端口）
   │
   └─ 业务 payload.py
         设备令牌：系统 Node 加载客户端图灵 N-API 扩展本地产出（约 2 秒，
@@ -74,14 +73,14 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 ### 从源码运行 / 重新打包
 
 ```sh
-# 源码运行（需 cryptography、websocket-client）；boot.py 也可直接跑
+# 源码运行（需 cryptography）；boot.py 也可直接跑
 python host/payload.py
 
 # 仅当修改 boot.py 本身或 Python 依赖集合时才需重打包
 # --hidden-import 清单必须覆盖三份外置脚本的全部运行时 import：
 # PyInstaller 只分析入口 boot.py，外置脚本的 import 不会被自动收集
 python -m PyInstaller --onefile --console --name wb-checkin-host --noconfirm \
-  --hidden-import=websocket --hidden-import=cryptography \
+  --hidden-import=cryptography \
   --hidden-import=ctypes --hidden-import=ctypes.wintypes \
   --hidden-import=shutil --hidden-import=time \
   --hidden-import=urllib.request --hidden-import=urllib.error \
@@ -109,7 +108,6 @@ cp host/tray_host.py host/payload.py host/wbcredential.py host/config.json host/
 | `auth_headers` | 附加请求头 |
 | `turing_addon_dir` | 客户端图灵 SDK N-API 扩展目录（设备令牌产出源；目录或 node 缺失则退化无令牌直发）。**自动维护**：失效/缺失时程序从客户端安装根动态发现并写回，人工编辑仅作覆盖 |
 | `turing_channel_id` / `turing_product_name` / `turing_product_version` | 图灵 SDK configure 参数。**自动维护**：动态取自客户端安装根的 `cli/product.json`（`turingSdk.channelId` / `applicationName` / `genieVersion`），客户端升级自动跟随 |
-| `token_exprs` / `uid_expr` / `domain_expr` | 仅路 B（CDP）使用的求值表达式 |
 
 签到与状态查询均为 **POST**；状态端点用 GET 一律 404；`checkin-activity-status` 才是真实状态，`checkin-status` 返回全零假状态。定时轮次仅当明确读到 `today_checked_in=true` 时幂等跳过；`data.active` 显式为 `false` 时当日放弃。**启动触发点不做状态预检**，直接发签到请求，由服务端判定当日是否已签（HTTP 400 + 业务码 10001 为正常幂等答复）。
 
@@ -134,7 +132,7 @@ cp host/tray_host.py host/payload.py host/wbcredential.py host/config.json host/
 | 托盘右键无菜单 | 先确认点的是溢出面板里带 `WorkBuddy 自动签到` 提示的图标；壳须以真实顶层窗口注册图标、置 `NIF_MESSAGE` 回调标志、设 `NOTIFYICON_VERSION_4`，并同时处理自定义回调与直接投递的 `WM_CONTEXTMENU` / `WM_RBUTTONUP`；查 `host.log` 是否出现消息码与菜单命令 |
 | 鼠标悬浮图标不显示程序名 | `NOTIFYICON_VERSION_4` 下标准 tooltip 默认被抑制，`uFlags` 须带 `NIF_SHOWTIP`（0x80）才会显示 `szTip`；提示文本为 `WorkBuddy 自动签到` |
 | `auth_failed` | 令牌过期或密钥已轮换；运行并登录一次客户端刷新登录态与缓存 |
-| 双路取令牌均失败 | 检查登录态文件是否存在且未过期、缓存 `keyId` 是否匹配 |
+| 取登录态失败 | 检查登录态文件是否存在且未过期、缓存 `keyId` 是否匹配、客户端是否曾登录并在本机运行过 |
 | 弹出「今日签到可能未生效」气泡 | 复核判定缺卡：服务端为「当场受理、事后判定」模式，签到返回 200 不代表入活动日历（客户端 11-20 升级引入设备令牌校验）。打开客户端确认或使用补签卡；`daemon.log` 应有 `verify -> MISSING from activity calendar` |
 | 日志出现 `device token unavailable` | 系统无 `node` 命令、`config.json` 的 `turing_addon_dir` 目录不存在或产令牌失败；程序退化为无令牌直发，该签到可能不入活动日历（见上条）。确认 `node` 在 PATH、目录指向客户端安装的 `resources/app.asar.unpacked/native/turing-sdk` |
 
@@ -164,7 +162,7 @@ workbuddy-auto-checkin/
     ├── boot.py                # 薄引导器（唯一被冻结的入口，路径动态推导）
     ├── config.json            # 端点 / 请求头 / 图灵 SDK 参数（源真值）
     ├── tray_host.py           # 界面壳（外置，可热替换）
-    ├── wbcredential.py        # 双路凭证 + 密钥缓存（外置）
+    ├── wbcredential.py        # 凭证单通道 + 密钥缓存（外置）
     ├── payload.py             # 定时签到业务 + 设备令牌 + 缺卡复核（外置）
     └── dist/                  # gitignored 构筑产物，五文件交付契约
         ├── wb-checkin-host.exe # 仅冻结 boot.py

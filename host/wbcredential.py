@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import time
-import urllib.request
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -15,11 +14,6 @@ HOME = os.path.expanduser("~")
 LOCAL = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
 AUTH_FILE = os.path.join(LOCAL, "CodeBuddyExtension", "Data", "Public", "auth",
                          "workbuddy-desktop.info")
-CDP_PORT_FILE = os.path.join(HOME, ".workbuddy", "app", "session",
-                             "DevToolsActivePort")
-BASE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.environ.get("WB_CHECKIN_CONFIG") or os.path.join(
-    BASE, "config.json")
 CACHE_FILE = os.environ.get("WB_CHECKIN_KEYCACHE") or os.path.join(
     LOCAL, "WorkBuddyCheckin", "keycache.json")
 
@@ -232,52 +226,15 @@ def route_a():
     return token, uid, domain
 
 
-def _cdp_eval(ws_url, expression):
-    import websocket
-    ws = websocket.create_connection(ws_url, timeout=8, suppress_origin=True)
-    try:
-        ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {
-            "expression": expression, "awaitPromise": True, "returnByValue": True}}))
-        while True:
-            msg = json.loads(ws.recv())
-            if msg.get("id") == 1:
-                result = msg.get("result") or {}
-                if result.get("exceptionDetails"):
-                    raise RuntimeError("CDP 表达式执行异常")
-                return (result.get("result") or {}).get("value")
-    finally:
-        ws.close()
-
-
-def route_b():
-    with open(CDP_PORT_FILE, "r", encoding="utf-8", errors="replace") as f:
-        port = int(f.readline().strip())
-    with urllib.request.urlopen("http://127.0.0.1:%d/json/list" % port, timeout=4) as r:
-        targets = json.load(r)
-    page = next((t for t in targets
-                 if t.get("type") == "page" and t.get("webSocketDebuggerUrl")), None)
-    if not page:
-        raise RuntimeError("CDP 无可连接页面（客户端未以调试端口启动）")
-    with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
-        cfg = json.load(f)
-    ws_url = page["webSocketDebuggerUrl"]
-    token = None
-    for expr in cfg.get("token_exprs") or []:
-        token = _cdp_eval(ws_url, expr)
-        if token:
-            break
-    if not token:
-        raise RuntimeError("CDP 未返回有效令牌")
-    uid = _cdp_eval(ws_url, cfg.get("uid_expr") or "null") or ""
-    domain = _cdp_eval(ws_url, cfg.get("domain_expr") or "null") or "www.workbuddy.cn"
-    return token, uid, domain
-
-
 def get_identity():
-    errors = []
-    for name, fn in (("A", route_a), ("B", route_b)):
-        try:
-            return fn()
-        except Exception as exc:
-            errors.append("%s: %s: %s" % (name, type(exc).__name__, exc))
-    raise RuntimeError("双路取令牌均失败 | " + " | ".join(errors))
+    """单一凭证通道：DPAPI 缓存 → 进程内存扫描 → AES-GCM 自解。
+
+    原 CDP 兜底（route_b）已于 v3.2.0 退役——其触发前提（客户端以
+    --remote-debugging-port 启动）在正常部署中从不成立，实测 2026-11-24
+    现实环境不可用，兜底名存实亡；A 路失败时明确报错，不静默。
+    """
+    try:
+        return route_a()
+    except Exception as exc:
+        raise RuntimeError("取登录态失败（%s: %s）| 需客户端曾登录并在本机运行过一次"
+                           % (type(exc).__name__, exc)) from exc
