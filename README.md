@@ -76,26 +76,18 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 # 源码运行（需 cryptography）；boot.py 也可直接跑
 python host/payload.py
 
-# 仅当修改 boot.py 本身、Python 依赖集合或 exe 图标资源时才需重打包
-# --hidden-import 清单必须覆盖三份外置脚本的全部运行时 import：
-# PyInstaller 只分析入口 boot.py，外置脚本的 import 不会被自动收集
-# --icon：图标字节内嵌于 tray_host.py 常量 TICON_B64（与托盘图标同源），
-# 打包前将其 base64 解码临时写为 .ico，打包后删除——磁盘不保留图片文件
-python -m PyInstaller --onefile --console --name wb-checkin-host --noconfirm \
-  --icon=<临时 icon.ico 路径> \
-  --hidden-import=cryptography \
-  --hidden-import=ctypes --hidden-import=ctypes.wintypes \
-  --hidden-import=shutil --hidden-import=time \
-  --hidden-import=urllib.request --hidden-import=urllib.error \
-  --hidden-import=json --hidden-import=base64 --hidden-import=hashlib \
-  --hidden-import=re --hidden-import=subprocess --hidden-import=threading \
-  --hidden-import=datetime --hidden-import=runpy \
-  --collect-all=cryptography --distpath host/dist --workpath host/build \
-  --specpath host host/boot.py
-cp host/tray_host.py host/payload.py host/wbcredential.py host/config.json host/dist/
+# 仅当修改 boot.py 本身、Python 依赖集合或 exe 图标资源时才需重打包。
+# 一键脚本 host/build.py 自动完成全部步骤，零手工记忆依赖：
+#   1. 从 tray_host.py 内嵌常量 TICON_B64 解码出完整 ICO 字节，落临时目录生成
+#      icon.ico（与托盘图标同源；不依赖 Pillow，磁盘不保留图片文件）
+#   2. 以固化参数调 PyInstaller 打包（hidden-import 清单、--icon、--collect-all）
+#   3. 打包后即删临时 ico 与 build/、spec 中间产物
+#   4. 自动同步 dist 外置文件并逐个 sha256 校验
+# 须用带 PyInstaller 的解释器执行；打包前若目标 exe 正在运行会 fail-closed 提示先退出
+<python-with-pyinstaller> host/build.py
 ```
 
-`host/dist/` 为构筑产物，已被 `.gitignore` 排除，可由上述命令重建。漏配 `--hidden-import` 的典型症状是 exe 秒退、退出码 1、零日志、控制台 `ModuleNotFoundError: ctypes.wintypes`——此问题**不能靠改外置 `.py` 修复**，须重打包。
+`host/dist/` 为构筑产物，已被 `.gitignore` 排除，可由上述命令重建。漏配 `--hidden-import` 的典型症状是 exe 秒退、退出码 1、零日志、控制台 `ModuleNotFoundError: ctypes.wintypes`——此问题**不能靠改外置 `.py` 修复**，须重打包（`build.py` 已固化完整清单）。
 
 ---
 
@@ -125,7 +117,7 @@ cp host/tray_host.py host/payload.py host/wbcredential.py host/config.json host/
 
 | 现象 | 处置 |
 |---|---|
-| exe 启动后秒退、退出码 1、两份日志均无新增 | 引导器模式的依赖收集缺口：PyInstaller 只静态分析 `boot.py`，外置脚本运行时加载的模块未冻结；捕获控制台可见 `ModuleNotFoundError`（典型 `ctypes.wintypes`）。按上方打包命令补齐完整 `--hidden-import` 清单后重打包，改 `.py` 无效 |
+| exe 启动后秒退、退出码 1、两份日志均无新增 | 引导器模式的依赖收集缺口：PyInstaller 只静态分析 `boot.py`，外置脚本运行时加载的模块未冻结；捕获控制台可见 `ModuleNotFoundError`（典型 `ctypes.wintypes`）。运行 `host/build.py` 重打包（清单已固化），改 `.py` 无效 |
 | 搬迁目录后无法启动 / 提示缺文件 | 五文件必须同目录；程序按 exe 自身位置动态推导，源码无写死路径。仅复制 exe 会以退出码 2 报错并列出缺失文件清单与当前程序目录 |
 | 控制台空白 | 确认 `payload.py` 与 exe 同目录且未损坏 |
 | 选「缩小到托盘」后窗口只是最小化、未隐藏 | 壳须沿 `GetAncestor(GetConsoleWindow(), GA_ROOTOWNER)` 的 owner 链定位可见窗口再 `SW_HIDE`；Windows Terminal 作为默认终端时 `GetConsoleWindow()` 只返回 0×0 的 `PseudoConsoleWindow` 伪窗口，隐藏它不影响 `CASCADIA_HOSTING_WINDOW_CLASS` 宿主窗口。`host.log` 应出现 `minimized to tray hwnd=` |
@@ -167,6 +159,7 @@ workbuddy-auto-checkin/
     ├── tray_host.py           # 界面壳（外置，可热替换）
     ├── wbcredential.py        # 凭证单通道 + 密钥缓存（外置）
     ├── payload.py             # 定时签到业务 + 设备令牌 + 缺卡复核（外置）
+    ├── build.py               # 一键重打包脚本（图标自动随包 + dist 同步校验）
     └── dist/                  # gitignored 构筑产物，五文件交付契约
         ├── wb-checkin-host.exe # 仅冻结 boot.py
         ├── tray_host.py       # 与源码同步，可热替换
