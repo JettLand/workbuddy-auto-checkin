@@ -104,11 +104,15 @@ GUI_FONT_H = -17  # 约 12.75pt（96dpi）
 GUI_FONT_FACE = "Microsoft YaHei UI"
 WM_NOTIFY = 0x4E
 TCM_GETCURSEL = 0x130B
-TCM_INSERTITEMW = 0x133E
-TCM_GETITEMW = 0x133D
+TCM_INSERTITEMW = 0x133E  # TCM_FIRST+62
+TCM_GETITEMW = 0x133C     # TCM_FIRST+60；⚠ 0x133D 是 SETITEMW——曾误用，
+                          # GETITEM 处发 SETITEM 会把空缓冲写入清空文本
 TCM_ADJUSTRECT = 0x1328
 TCN_SELCHANGE = -551
 ICC_TAB_CLASSES = 8
+WM_GETTEXTLENGTH = 0x0E
+EM_GETSEL = 0xB0
+EM_REPLACESEL = 0xC2
 DEFAULT_CHARSET = 1
 MB_ICONINFORMATION = 0x40
 SPI_GETWORKAREA = 0x0030
@@ -147,7 +151,7 @@ APP_MENU = 0x8002
 _state = {"nid": None, "gui": None, "tab": None,
           "edit_cur": None, "edit_hist": None,
           "log_pos": None, "log_carry": b"",
-          "cur_text": "", "hist_text": "", "ph_cur": False, "ph_hist": False,
+          "cur_text": "", "hist_text": "",
           "stop": threading.Event(), "last_menu": 0.0, "mutex": None}
 
 
@@ -176,13 +180,33 @@ def _log_path():
     return os.path.join(_base(), "logs", "daemon.log")
 
 
-def _apply_text(edit, txt, is_cur):
-    """重设控件文本（仅走 WM_SETTEXT——本机已实证可用的通路），可见页滚到末尾。"""
+def _edit_reset(edit, txt):
+    """整页重设控件文本（首次加载/换页/截尾），可见页滚到末尾。"""
     if not edit:
         return
     U.SetWindowTextW(edit, txt)
-    if _tab_sel() == (0 if is_cur else 1):
+    e = _state["edit_cur"] if _tab_sel() == 0 else _state["edit_hist"]
+    if edit == e:
         U.SendMessageW(edit, EM_SETSEL, -1, -1)
+        U.SendMessageW(edit, EM_SCROLLCARET, 0, 0)
+
+
+def _edit_append(edit, add):
+    """真流式追加：EM_REPLACESEL 只写增量不重写全文，不打断用户翻阅；
+    光标原本就在末尾时自动跟随滚动。"""
+    if not edit or not add:
+        return
+    pos = U.SendMessageW(edit, EM_GETSEL, 0, 0)
+    n = U.SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0)
+    follow = pos >= n
+    U.SendMessageW(edit, EM_SETSEL, n, n)
+    # EM_REPLACESEL 的 lParam 是字符串指针；SendMessageW 全局 argtypes
+    # 限定 lParam 为整数，故显式传 buffer 地址（同步调用期间 buffer 存活）。
+    buf = ctypes.create_unicode_buffer(add)
+    U.SendMessageW(edit, EM_REPLACESEL, 0,
+                   ctypes.cast(buf, ctypes.c_void_p).value)
+    e = _state["edit_cur"] if _tab_sel() == 0 else _state["edit_hist"]
+    if follow and edit == e:
         U.SendMessageW(edit, EM_SCROLLCARET, 0, 0)
 
 
@@ -207,18 +231,17 @@ def _safe_decode(b):
         return b.decode("utf-8", "replace"), b""
 
 
-def _mirror_append(is_cur, txt):
-    """把新增文本并入镜像（首见时去掉占位符），超限截尾。"""
+def _mirror_grow(key, txt):
+    """把新增文本并入镜像，返回净增文本；镜像超限截尾时返回 None
+    （调用方需整页重置以保持控件与镜像一致）。"""
     if not txt:
-        return
-    key = "cur_text" if is_cur else "hist_text"
-    ph = "ph_cur" if is_cur else "ph_hist"
-    if _state[ph]:
-        _state[ph] = False
-        _state[key] = ""
-    _state[key] = _state[key] + txt
-    if len(_state[key]) > GUI_TAIL_BYTES:
-        _state[key] = _state[key][-GUI_TAIL_BYTES:]
+        return ""
+    new = _state[key] + txt
+    if len(new) > GUI_TAIL_BYTES:
+        _state[key] = new[-GUI_TAIL_BYTES:]
+        return None
+    _state[key] = new
+    return txt
 
 
 def _log_load_full():
@@ -239,17 +262,13 @@ def _log_load_full():
         _state["log_pos"] = 0
     text = _crlf(data.decode("utf-8", "replace"))
     idx = text.rfind(LOG_MARKER)
-    cur = text[idx:] if idx != -1 else text
-    hist = text[:idx] if idx != -1 else ""
-    _state["cur_text"] = cur or "(空)"
-    _state["hist_text"] = hist or "(暂无历史日志)"
-    _state["ph_cur"] = cur == ""
-    _state["ph_hist"] = hist == ""
+    _state["cur_text"] = text[idx:] if idx != -1 else text
+    _state["hist_text"] = text[:idx] if idx != -1 else ""
 
 
 def _log_append():
-    """流式追加：只读新增字节并入镜像；出现新 daemon started 时换页
-    （标记前归历史页追加，标记起重置当前页）。日志变短视为轮转，全量重载。"""
+    """流式追加：只读新增字节；出现新 daemon started 时换页（标记前
+    追加进历史页、标记起重置当前页）。日志变短视为轮转，全量重载。"""
     p = _log_path()
     try:
         size = os.path.getsize(p)
@@ -258,6 +277,8 @@ def _log_append():
     pos = _state["log_pos"]
     if size < pos:
         _log_load_full()
+        _edit_reset(_state["edit_cur"], _state["cur_text"])
+        _edit_reset(_state["edit_hist"], _state["hist_text"])
         return
     if size == pos:
         return
@@ -272,29 +293,32 @@ def _log_append():
     _state["log_carry"] = carry
     idx = text.rfind(LOG_MARKER)
     if idx != -1:
-        _mirror_append(False, text[:idx])
-        _state["ph_cur"] = False
+        hist_add = _mirror_grow("hist_text", _crlf(text[:idx]))
+        if hist_add is None:
+            _edit_reset(_state["edit_hist"], _state["hist_text"])
+        else:
+            _edit_append(_state["edit_hist"], hist_add)
         cur = _crlf(text[idx:])
         if len(cur) > GUI_TAIL_BYTES:
             cur = cur[-GUI_TAIL_BYTES:]
         _state["cur_text"] = cur
+        _edit_reset(_state["edit_cur"], cur)
     else:
-        _mirror_append(True, text)
+        add = _mirror_grow("cur_text", _crlf(text))
+        if add is None:
+            _edit_reset(_state["edit_cur"], _state["cur_text"])
+        else:
+            _edit_append(_state["edit_cur"], add)
 
 
 def _refresh_log():
-    """定时刷新：镜像有变化才重设控件文本（流式追加，不闪屏）。"""
+    """定时刷新（流式）：首次全量加载，此后每轮只把新增字节追加进控件。"""
     if _state["log_pos"] is None:
         _log_load_full()
-        _apply_text(_state["edit_cur"], _state["cur_text"], True)
-        _apply_text(_state["edit_hist"], _state["hist_text"], False)
+        _edit_reset(_state["edit_cur"], _state["cur_text"])
+        _edit_reset(_state["edit_hist"], _state["hist_text"])
         return
-    old_cur, old_hist = _state["cur_text"], _state["hist_text"]
     _log_append()
-    if _state["cur_text"] != old_cur:
-        _apply_text(_state["edit_cur"], _state["cur_text"], True)
-    if _state["hist_text"] != old_hist:
-        _apply_text(_state["edit_hist"], _state["hist_text"], False)
 
 
 def _tab_sel():
