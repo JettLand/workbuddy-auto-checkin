@@ -102,6 +102,8 @@ GUI_TIMER_MS = 2000
 GUI_TAIL_BYTES = 4 * 1024 * 1024
 GUI_FONT_H = -17  # 约 12.75pt（96dpi）
 GUI_FONT_FACE = "Microsoft YaHei UI"
+GUI_TAB_FONT_H = -15     # 标签页头约 11.25pt，略小于正文更协调
+GUI_TAB_FONT_FACE = "Segoe UI"  # 中文经系统字体链接回退雅黑
 WM_NOTIFY = 0x4E
 TCM_GETCURSEL = 0x130B
 TCM_INSERTITEMW = 0x133E  # TCM_FIRST+62
@@ -652,6 +654,10 @@ def _create_gui(inst, hicon):
                                   ctypes.addressof(item)))
     for e in (edit_cur, edit_hist):
         U.SendMessageW(e, WM_SETFONT, hfont, 1)
+    # 标签页头指定 Segoe UI（此前一直用 System 默认位图字体，观感差）
+    hfont_tab = G.CreateFontW(GUI_TAB_FONT_H, 0, 0, 0, 400, 0, 0, 0,
+                              DEFAULT_CHARSET, 0, 0, 0, 0, GUI_TAB_FONT_FACE)
+    U.SendMessageW(tab, WM_SETFONT, hfont_tab, 1)
     _layout()
     _center_window(gui)
     U.SetTimer(gui, GUI_TIMER_ID, GUI_TIMER_MS, None)
