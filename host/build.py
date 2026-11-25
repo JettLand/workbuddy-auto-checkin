@@ -57,7 +57,7 @@ def main():
                      "关闭 %s 后重试" % exe)
     ico = icon_to_temp()
     try:
-        cmd = [sys.executable, "-m", "PyInstaller", "--onefile", "--console",
+        cmd = [sys.executable, "-m", "PyInstaller", "--onefile", "--noconsole",
                "--name", NAME, "--noconfirm", "--icon=" + ico]
         cmd += ["--hidden-import=" + h for h in HIDDEN]
         cmd += ["--collect-all=cryptography",
