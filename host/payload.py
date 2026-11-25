@@ -17,10 +17,11 @@ CONFIG_FILE = os.environ.get("WB_CHECKIN_CONFIG") or os.path.join(
     BASE, "config.json")
 LOG = os.path.join(BASE, "logs", "daemon.log")
 SCHEDULE = [(0, 5)]
+RETRY_MAX = 6  # 网络类失败当日重试上限；间隔 10min*次数（累计约 3.5h）
 
 
 def log(msg):
-    line = datetime.datetime.now().isoformat(timespec="seconds") + " " + msg
+    line = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " " + msg
     os.makedirs(os.path.dirname(LOG), exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
@@ -218,6 +219,30 @@ def post(url, token, uid, domain, headers):
         return 0, "ERR:" + str(e)
 
 
+def _announce_success(text):
+    """签到受理 200 时输出明确成功日志与托盘信息气泡（轻量，不弹模态窗）。"""
+    credit = streak = "?"
+    try:
+        d = json.loads(text) or {}
+        data = d.get("data") or {}
+        if d.get("credit") is not None or data.get("credit") is not None:
+            credit = d.get("credit") if d.get("credit") is not None \
+                else data.get("credit")
+        if d.get("streak_days") is not None or data.get("streak_days") \
+                is not None:
+            streak = d.get("streak_days") if d.get("streak_days") is not None \
+                else data.get("streak_days")
+    except Exception:
+        pass
+    log("checkin SUCCESS: credit +%s, streak %s days" % (credit, streak))
+    balloon = globals().get("_tray_balloon")
+    if balloon:
+        try:
+            balloon("签到成功", "今日积分 +%s，连续签到 %s 天" % (credit, streak))
+        except Exception as e:
+            log("success balloon ERROR %s: %s" % (type(e).__name__, e))
+
+
 def run_once(force=False):
     with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
         cfg = json.load(f)
@@ -246,6 +271,7 @@ def run_once(force=False):
         code, text = post(base + path, token, uid, domain, headers)
         log("checkin %s -> %s %s" % (path, code, text[:160]))
         if code == 200:
+            _announce_success(text)
             return "ok"
         if code in (401, 403):
             return "auth_failed"
@@ -300,10 +326,49 @@ def next_run_at():
         hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def _retry_network():
+    """网络类失败（run_once 归为 error）的当日有限重试。
+
+    间隔 = 10min * 重试次数（10/20/.../60 分钟，累计约 3.5h），与阁主
+    2026-11-25 裁定一致。等待将跨过下一定时点时提前让位——定时触发
+    会带状态预检重新尝试，等价于重试。全部失败发置顶告警；阁主点掉
+    弹窗后主循环恢复，next_run_at() 已过即自动补签。
+    """
+    for attempt in range(1, RETRY_MAX + 1):
+        wait = 10 * 60 * attempt
+        nxt = next_run_at()
+        if (datetime.datetime.now()
+                + datetime.timedelta(seconds=wait)) >= nxt:
+            log("retry aborted: next schedule %s within wait window"
+                % nxt.strftime("%Y-%m-%d %H:%M:%S"))
+            return None
+        time.sleep(wait)
+        try:
+            result = run_once()
+        except Exception as e:
+            log("retry %d ERROR %s: %s" % (attempt, type(e).__name__, e))
+            continue
+        log("retry %d -> %s" % (attempt, result))
+        if result != "error":
+            return result
+    notify = globals().get("_tray_notify")
+    if notify:
+        try:
+            notify("WorkBuddy 自动签到",
+                   "网络异常导致今日签到失败（已重试 %d 次），请检查网络后"
+                   "重启本程序补签，或打开客户端使用补签卡。" % RETRY_MAX)
+            log("alert -> tray balloon sent (network)")
+        except Exception as e:
+            log("alert ERROR %s: %s" % (type(e).__name__, e))
+    return "error"
+
+
 def _run(trigger, force=False):
     try:
         result = run_once(force=force)
         log("%s trigger -> %s" % (trigger, result))
+        if result == "error":
+            result = _retry_network()
         if result in ("ok", "already (server confirmed)"):
             with open(CONFIG_FILE, "r",
                       encoding="utf-8-sig") as f:
@@ -330,7 +395,7 @@ def main():
     _run("startup", force=True)
     while True:
         target = next_run_at()
-        log("next run at " + target.isoformat(timespec="seconds"))
+        log("next run at " + target.strftime("%Y-%m-%d %H:%M:%S"))
         while True:
             remaining = (target - datetime.datetime.now()).total_seconds()
             if remaining <= 0:

@@ -103,7 +103,6 @@ GUI_TAIL_BYTES = 4 * 1024 * 1024
 GUI_FONT_H = -17  # 约 12.75pt（96dpi）
 GUI_FONT_FACE = "Microsoft YaHei UI"
 WM_NOTIFY = 0x4E
-WS_CLIPSIBLINGS = 0x04000000
 TCM_GETCURSEL = 0x130B
 TCM_INSERTITEMW = 0x133E
 TCM_GETITEMW = 0x133D
@@ -117,6 +116,7 @@ SWP_NOSIZE = 0x1
 SWP_NOZORDER = 0x4
 ERROR_ALREADY_EXISTS = 183
 MUTEX_NAME = "WorkBuddyCheckin"
+LOG_MARKER = "daemon started"
 
 
 class NMHDR(ctypes.Structure):
@@ -125,8 +125,13 @@ class NMHDR(ctypes.Structure):
 
 
 class TCITEMW(ctypes.Structure):
-    _fields_ = [("mask", w.UINT), ("lpReserved1", w.LPARAM),
-                ("lpReserved2", w.LPARAM), ("pszText", w.LPWSTR),
+    """与 commctrl.h TCITEMW 原型严格一致（x64 共 40 字节）。
+
+    历史教训：lpReserved1/2 曾误声明为 LPARAM(8B)，整体错位
+    （pszText 落 @24 而控件读 @16）→ 插入"成功"但文本恒空。
+    """
+    _fields_ = [("mask", w.UINT), ("lpReserved1", w.UINT),
+                ("lpReserved2", w.UINT), ("pszText", w.LPWSTR),
                 ("cchTextMax", ctypes.c_int), ("iImage", ctypes.c_int),
                 ("lParam", w.LPARAM)]
 
@@ -139,9 +144,11 @@ TICON_B64 = ("AAABAAQAEBAAAAEAIAC6AAAARgAAACAgAAABACAAIgEAAAABAAAwMAAAAQAgAN8BAA
 CB_MSG = 0x8001
 APP_MENU = 0x8002
 
-_state = {"nid": None, "gui": None, "tab": None, "edit_cur": None,
-          "edit_hist": None, "stop": threading.Event(), "last_menu": 0.0,
-          "mutex": None}
+_state = {"nid": None, "gui": None, "tab": None,
+          "edit_cur": None, "edit_hist": None,
+          "log_pos": None, "log_carry": b"",
+          "cur_text": "", "hist_text": "", "ph_cur": False, "ph_hist": False,
+          "stop": threading.Event(), "last_menu": 0.0, "mutex": None}
 
 
 def _base():
@@ -154,62 +161,159 @@ def _host_log(msg):
         path = os.path.join(_base(), "logs", "host.log")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
-            f.write(datetime.datetime.now().isoformat(timespec="seconds")
+            f.write(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     + " " + msg + "\n")
     except Exception:
         pass
 
 
-def _read_views():
-    """读取运行日志并切分为两个标签页视图（换行统一为 EDIT 所需的 CRLF）。
+def _crlf(s):
+    """换行归一为 EDIT 所需 CRLF（文件为文本模式 CRLF，先归 LF 再转，防 \r\r\n）。"""
+    return s.replace("\r\n", "\n").replace("\n", "\r\n")
 
-    「当前信息」＝最后一个 `daemon started` 起至文件尾（本次运行输出）；
-    「历史信息」＝其之前的运行日志（只取尾部窗口，上限 GUI_TAIL_BYTES）。
-    """
-    p = os.path.join(_base(), "logs", "daemon.log")
+
+def _log_path():
+    return os.path.join(_base(), "logs", "daemon.log")
+
+
+def _apply_text(edit, txt, is_cur):
+    """重设控件文本（仅走 WM_SETTEXT——本机已实证可用的通路），可见页滚到末尾。"""
+    if not edit:
+        return
+    U.SetWindowTextW(edit, txt)
+    if _tab_sel() == (0 if is_cur else 1):
+        U.SendMessageW(edit, EM_SETSEL, -1, -1)
+        U.SendMessageW(edit, EM_SCROLLCARET, 0, 0)
+
+
+def _safe_decode(b):
+    """UTF-8 增量解码：结尾不完整的字符留作 carry 与下一批拼接。"""
+    if not b:
+        return "", b""
+    i = len(b) - 1
+    while i >= 0 and (b[i] & 0xC0) == 0x80:
+        i -= 1
+    if i >= 0 and (b[i] & 0x80):
+        c = b[i]
+        total = (2 if (c & 0xE0) == 0xC0 else 3 if (c & 0xF0) == 0xE0 else 4)
+        if len(b) - i < total:
+            try:
+                return b[:i].decode("utf-8"), b[i:]
+            except UnicodeDecodeError:
+                pass
+    try:
+        return b.decode("utf-8"), b""
+    except UnicodeDecodeError:
+        return b.decode("utf-8", "replace"), b""
+
+
+def _mirror_append(is_cur, txt):
+    """把新增文本并入镜像（首见时去掉占位符），超限截尾。"""
+    if not txt:
+        return
+    key = "cur_text" if is_cur else "hist_text"
+    ph = "ph_cur" if is_cur else "ph_hist"
+    if _state[ph]:
+        _state[ph] = False
+        _state[key] = ""
+    _state[key] = _state[key] + txt
+    if len(_state[key]) > GUI_TAIL_BYTES:
+        _state[key] = _state[key][-GUI_TAIL_BYTES:]
+
+
+def _log_load_full():
+    """全量加载（首次/日志轮转时）：按最后一个 daemon started 切分两页。"""
+    p = _log_path()
+    data = b""
     try:
         size = os.path.getsize(p)
         with open(p, "rb") as f:
             if size > GUI_TAIL_BYTES:
                 f.seek(size - GUI_TAIL_BYTES)
-            lines = f.read().decode("utf-8", "replace").splitlines(True)
-            if size > GUI_TAIL_BYTES and lines:
-                lines = lines[1:]  # 截断处的半行丢弃
+            data = f.read()
+        if size > GUI_TAIL_BYTES:
+            nl = data.find(b"\n")  # 丢弃截断处的半行
+            data = data[nl + 1:] if nl != -1 else b""
+        _state["log_pos"] = os.path.getsize(p)
     except OSError:
-        return "(暂无运行日志)", "(暂无历史日志)"
-    start = 0
-    for i, ln in enumerate(lines):
-        if "daemon started" in ln:
-            start = i
-    # 日志文件为文本模式写入（行尾已是 CRLF），先归一到 LF 再统一转
-    # EDIT 控件所需的 CRLF，避免二次替换产生 \r\r\n
-    cur = "".join(lines[start:]).replace("\r\n", "\n").replace("\n", "\r\n")
-    hist = "".join(lines[:start]).replace("\r\n", "\n").replace("\n", "\r\n")
-    return cur or "(空)", hist or "(暂无历史日志)"
+        _state["log_pos"] = 0
+    text = _crlf(data.decode("utf-8", "replace"))
+    idx = text.rfind(LOG_MARKER)
+    cur = text[idx:] if idx != -1 else text
+    hist = text[:idx] if idx != -1 else ""
+    _state["cur_text"] = cur or "(空)"
+    _state["hist_text"] = hist or "(暂无历史日志)"
+    _state["ph_cur"] = cur == ""
+    _state["ph_hist"] = hist == ""
+
+
+def _log_append():
+    """流式追加：只读新增字节并入镜像；出现新 daemon started 时换页
+    （标记前归历史页追加，标记起重置当前页）。日志变短视为轮转，全量重载。"""
+    p = _log_path()
+    try:
+        size = os.path.getsize(p)
+    except OSError:
+        return
+    pos = _state["log_pos"]
+    if size < pos:
+        _log_load_full()
+        return
+    if size == pos:
+        return
+    try:
+        with open(p, "rb") as f:
+            f.seek(pos)
+            new = f.read()
+    except OSError:
+        return
+    _state["log_pos"] = size
+    text, carry = _safe_decode(_state["log_carry"] + new)
+    _state["log_carry"] = carry
+    idx = text.rfind(LOG_MARKER)
+    if idx != -1:
+        _mirror_append(False, text[:idx])
+        _state["ph_cur"] = False
+        cur = _crlf(text[idx:])
+        if len(cur) > GUI_TAIL_BYTES:
+            cur = cur[-GUI_TAIL_BYTES:]
+        _state["cur_text"] = cur
+    else:
+        _mirror_append(True, text)
+
+
+def _refresh_log():
+    """定时刷新：镜像有变化才重设控件文本（流式追加，不闪屏）。"""
+    if _state["log_pos"] is None:
+        _log_load_full()
+        _apply_text(_state["edit_cur"], _state["cur_text"], True)
+        _apply_text(_state["edit_hist"], _state["hist_text"], False)
+        return
+    old_cur, old_hist = _state["cur_text"], _state["hist_text"]
+    _log_append()
+    if _state["cur_text"] != old_cur:
+        _apply_text(_state["edit_cur"], _state["cur_text"], True)
+    if _state["hist_text"] != old_hist:
+        _apply_text(_state["edit_hist"], _state["hist_text"], False)
 
 
 def _tab_sel():
     """当前选中页索引：控件无选中（-1）等异常一律按第 0 页「当前信息」。"""
-    return 1 if U.SendMessageW(_state["tab"], TCM_GETCURSEL, 0, 0) == 1 else 0
-
-
-def _refresh_log():
-    cur, hist = _read_views()
-    sel = _tab_sel()
-    edit, txt = ((_state["edit_cur"], cur) if sel == 0
-                 else (_state["edit_hist"], hist))
-    if edit:
-        U.SetWindowTextW(edit, txt)
-        U.SendMessageW(edit, EM_SETSEL, -1, -1)
-        U.SendMessageW(edit, EM_SCROLLCARET, 0, 0)
+    sel = U.SendMessageW(_state["tab"], TCM_GETCURSEL, 0, 0)
+    return 1 if sel == 1 else 0
 
 
 def _show_tab():
-    sel = _tab_sel()
+    """按 Tab 控件选中态切换两页可见性；切换后把可见页滚到末尾。"""
+    idx = _tab_sel()
     if _state["edit_cur"]:
-        U.ShowWindow(_state["edit_cur"], SW_SHOW if sel == 0 else SW_HIDE)
+        U.ShowWindow(_state["edit_cur"], SW_SHOW if idx == 0 else SW_HIDE)
     if _state["edit_hist"]:
-        U.ShowWindow(_state["edit_hist"], SW_SHOW if sel == 1 else SW_HIDE)
+        U.ShowWindow(_state["edit_hist"], SW_SHOW if idx == 1 else SW_HIDE)
+    e = _state["edit_cur"] if idx == 0 else _state["edit_hist"]
+    if e:
+        U.SendMessageW(e, EM_SETSEL, -1, -1)
+        U.SendMessageW(e, EM_SCROLLCARET, 0, 0)
 
 
 def _layout():
@@ -442,7 +546,6 @@ def _main_proc(hwnd, msg, wp, lp):
             return 0
         if nm.code == TCN_SELCHANGE and nm.hwndFrom == _state["tab"]:
             _show_tab()
-            _refresh_log()
             return 0
         return 0
     if msg == WM_TIMER and wp == GUI_TIMER_ID:
@@ -496,7 +599,7 @@ def _create_gui(inst, hicon):
                             0, 0, GUI_W, GUI_H,
                             None, None, inst, None)
     tab = U.CreateWindowExW(0, "SysTabControl32", None,
-                            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                            WS_CHILD | WS_VISIBLE,
                             0, 0, 0, 0, gui, None, inst, None)
     _state["gui"] = gui
     _state["tab"] = tab
@@ -511,23 +614,25 @@ def _create_gui(inst, hicon):
     _state["edit_hist"] = edit_hist
     hfont = G.CreateFontW(GUI_FONT_H, 0, 0, 0, 400, 0, 0, 0,
                           DEFAULT_CHARSET, 0, 0, 0, 0, GUI_FONT_FACE)
-    # 标签页插入：显式递增索引（曾两次插 index=0 致默认选中第 1 页、
-    # 映射错位使可见页永不刷新）；文本用显式 buffer 保活（LPWSTR 字段
-    # 直接赋 str 在部分环境读回为空，改 buffer+cast 稳妥）。
-    _tab_bufs = []
+    # 标签页插入：显式递增索引（曾两次插 index=0 致默认选中错位）；
+    # TCITEMW 必须与 commctrl.h 原型一致（lpReserved 为 UINT，x64 共
+    # 40 字节、pszText@16）——此前误声明为 LPARAM 致结构错位、文本恒空。
+    rcs = []
     for idx, name in enumerate(("当前信息", "历史信息")):
         buf = ctypes.create_unicode_buffer(name)
-        _tab_bufs.append(buf)
         item = TCITEMW()
         item.mask = 1  # TCIF_TEXT
         item.pszText = ctypes.cast(buf, w.LPWSTR)
-        U.SendMessageW(tab, TCM_INSERTITEMW, idx, ctypes.addressof(item))
+        item.cchTextMax = len(name) + 1
+        rcs.append(U.SendMessageW(tab, TCM_INSERTITEMW, idx,
+                                  ctypes.addressof(item)))
     for e in (edit_cur, edit_hist):
         U.SendMessageW(e, WM_SETFONT, hfont, 1)
     _layout()
     _center_window(gui)
-    # 插入后读回自证：宿主日志记录控件实际持有的标签文本，供真机
-    # 环境排查（注入类环境会清空结构消息的字符串传递）。
+    U.SetTimer(gui, GUI_TIMER_ID, GUI_TIMER_MS, None)
+    # 插入后读回自证：宿主日志记录返回值与控件实际持有的标签文本，
+    # 供真机环境闭环（历史空标签根因＝结构体错位，非环境因素）。
     got = []
     for i in range(2):
         rb = ctypes.create_unicode_buffer(64)
@@ -535,10 +640,10 @@ def _create_gui(inst, hicon):
         gi.mask = 1
         gi.pszText = ctypes.cast(rb, w.LPWSTR)
         gi.cchTextMax = 64
-        U.SendMessageW(tab, TCM_GETITEMW, i, ctypes.addressof(gi))
-        got.append(rb.value)
-    _host_log("tab labels: %r" % (got,))
-    U.SetTimer(gui, GUI_TIMER_ID, GUI_TIMER_MS, None)
+        rc = U.SendMessageW(tab, TCM_GETITEMW, i, ctypes.addressof(gi))
+        got.append((rc, rb.value))
+    _host_log("tab labels: %r sizeof=%d"
+              % (got, ctypes.sizeof(TCITEMW)))
     _refresh_log()
     return gui
 
