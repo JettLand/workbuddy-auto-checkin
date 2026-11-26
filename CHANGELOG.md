@@ -8,7 +8,7 @@
 
 **启动触发复用定时触发流程：先查服务端状态，未签才发签到（阁主令）**
 
-- `payload.py` 的 `main()` 启动触发由 `_run("startup", force=True)` 改为 `_run("startup")`——与每日 00:05 定时触发完全同流程：先 POST `checkin-activity-status` 状态预检（`today_checked_in=true` → 幂等短路 `already`、`data.active=false` → 当日放弃 `inactive`、预检不可达/未确认 → 照常发签到请求兜底），不再盲目直发依赖服务端 400/10001 幂等答复。预检返回非 200（含网络异常）不影响兜底直发路径。已签场景启动时不再发出多余的签到 POST；未签/预检失败场景行为与旧版一致。README（架构图触发说明、幂等语义段、快速开始启动日志样例）与版本号同步修订。
+- `payload.py` 的 `main()` 启动触发由 `_run("startup", force=True)` 改为 `_run("startup")`——与每日 00:05 定时触发完全同流程：先 POST `checkin-activity-status` 状态预检（`today_checked_in=true` → 幂等短路 `already`、`data.active=false` → 当日放弃 `inactive`、预检不可达/未确认 → 照常发签到请求兜底），不再盲目直发依赖服务端 400/10001 幂等答复。预检返回非 200（含网络异常）不影响兜底直发路径。已签场景启动时不再发出多余的签到 POST；未签/预检失败场景行为与旧版一致。**顺带清理孤儿参数**（本次改动唯一调用点撤除后 `force` 已无任何调用方传 `True`）：删除 `run_once(force=False)` 与 `_run(trigger, force=False)` 的 `force` 参数及 `if not force` 包装（预检块还原为一等逻辑），两函数签名收敛为 `run_once()` / `_run(trigger)`。README（架构图触发说明、幂等语义段、快速开始启动日志样例）与版本号同步修订。源码态冒烟：已签场景 `device token ready len=663` → `RESULT: already`，零多余签到 POST。
 
 ## [3.2.0] — 2026-11-23
 

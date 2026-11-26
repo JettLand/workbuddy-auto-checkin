@@ -243,7 +243,7 @@ def _announce_success(text):
             log("success balloon ERROR %s: %s" % (type(e).__name__, e))
 
 
-def run_once(force=False):
+def run_once():
     with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
         cfg = json.load(f)
     token, uid, domain = wbcredential.get_identity()
@@ -253,20 +253,19 @@ def run_once(force=False):
         log("device token ready len=%d" % len(headers["X-Device-Token"]))
     else:
         log("device token unavailable; posting without it")
-    if not force:
-        for path in cfg.get("checkin_status_paths") or []:
-            code, text = post(base + path, token, uid, domain, cfg.get("auth_headers"))
-            if code != 200:
-                continue
-            try:
-                data = (json.loads(text) or {}).get("data") or {}
-            except Exception:
-                data = {}
-            if data.get("active") is False:
-                return "inactive"
-            if data.get("today_checked_in") is True:
-                return "already"
-            break
+    for path in cfg.get("checkin_status_paths") or []:
+        code, text = post(base + path, token, uid, domain, cfg.get("auth_headers"))
+        if code != 200:
+            continue
+        try:
+            data = (json.loads(text) or {}).get("data") or {}
+        except Exception:
+            data = {}
+        if data.get("active") is False:
+            return "inactive"
+        if data.get("today_checked_in") is True:
+            return "already"
+        break
     for path in cfg.get("checkin_paths") or []:
         code, text = post(base + path, token, uid, domain, headers)
         log("checkin %s -> %s %s" % (path, code, text[:160]))
@@ -363,9 +362,9 @@ def _retry_network():
     return "error"
 
 
-def _run(trigger, force=False):
+def _run(trigger):
     try:
-        result = run_once(force=force)
+        result = run_once()
         log("%s trigger -> %s" % (trigger, result))
         if result == "error":
             result = _retry_network()
