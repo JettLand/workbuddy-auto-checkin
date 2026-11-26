@@ -47,6 +47,11 @@ class MSG(ctypes.Structure):
     ]
 
 
+class ACCEL(ctypes.Structure):
+    """键盘加速键表项（CreateAcceleratorTableW 消费，8 字节）。"""
+    _fields_ = [("fVirt", w.BYTE), ("key", w.WORD), ("cmd", w.WORD)]
+
+
 WM_DESTROY = 2
 WM_RBUTTONUP = 0x205
 WM_LBUTTONDBLCLK = 0x203
@@ -113,6 +118,26 @@ TCM_ADJUSTRECT = 0x1328
 TCN_SELCHANGE = -551
 ICC_TAB_CLASSES = 8
 WM_GETTEXTLENGTH = 0x0E
+WM_GETTEXT = 0x000D
+WM_COMMAND = 0x111
+WM_KEYDOWN = 0x100
+VK_RETURN = 0x0D
+VK_ESCAPE = 0x1B
+GWLP_WNDPROC = -4
+WS_EX_CLIENTEDGE = 0x200
+ES_AUTOHSCROLL = 0x80
+BN_CLICKED = 0
+GUI_BTN_NEXT = 2001   # ↓ 向下查找
+GUI_BTN_PREV = 2002   # ↑ 向上查找
+GUI_BTN_CLOSE = 2003  # × 关闭检索栏
+GUI_EDIT_SEARCH = 2004
+GUI_ACCEL_FIND = 2005  # Ctrl+F 加速键命令 ID
+FVIRTKEY = 0x01
+FCONTROL = 0x08
+GUI_SEARCH_BAR_H = 32  # 检索浮层行高
+GUI_BTN_SQ = 34        # 浮层内方形按钮宽高
+HWND_TOP = 0
+SWP_NOMOVE = 0x2
 EM_GETSEL = 0xB0
 EM_REPLACESEL = 0xC2
 DEFAULT_CHARSET = 1
@@ -152,6 +177,9 @@ APP_MENU = 0x8002
 
 _state = {"nid": None, "gui": None, "tab": None,
           "edit_cur": None, "edit_hist": None,
+          "search": None, "btn_next": None, "btn_prev": None,
+          "btn_close": None, "search_prev": None,
+          "dirty_cur": False, "dirty_hist": False,
           "log_pos": None, "log_carry": b"",
           "cur_text": "", "hist_text": "",
           "stop": threading.Event(), "last_menu": 0.0, "mutex": None}
@@ -182,34 +210,75 @@ def _log_path():
     return os.path.join(_base(), "logs", "daemon.log")
 
 
-def _edit_reset(edit, txt):
-    """整页重设控件文本（首次加载/换页/截尾），可见页滚到末尾。"""
+def _scroll_caret(edit):
+    """把光标滚入视野（不改变选区）。"""
+    U.SendMessageW(edit, EM_SCROLLCARET, 0, 0)
+
+
+def _scroll_end(edit):
+    """选中全部文本并把光标置于末尾滚动到视野（整页重设后使用）。"""
+    U.SendMessageW(edit, EM_SETSEL, -1, -1)
+    _scroll_caret(edit)
+
+
+def _tab_sel():
+    """当前选中页索引：控件无选中（-1）等异常一律按第 0 页「当前信息」。"""
+    sel = U.SendMessageW(_state["tab"], TCM_GETCURSEL, 0, 0)
+    return 1 if sel == 1 else 0
+
+
+def _visible_edit():
+    """当前选中页对应的 EDIT 控件。"""
+    return _state["edit_cur"] if _tab_sel() == 0 else _state["edit_hist"]
+
+
+def _mirror_key(idx):
+    """页索引 → 镜像文本键（cur_text/hist_text）。"""
+    return "cur_text" if idx == 0 else "hist_text"
+
+
+def _dirty_key(idx):
+    """页索引 → 脏标记键。隐藏页不写控件只标脏，显示时统一重设。"""
+    return "dirty_cur" if idx == 0 else "dirty_hist"
+
+
+def _edit_reset(edit, txt, idx):
+    """整页重设控件文本（首次加载/换页/截尾/脏页应用），滚到末尾。
+
+    非当前选中页只标脏不写控件——multiline EDIT 在隐藏期间不重算
+    换行布局，直接写再显示会出现旧空白视图（需再切一次标签才刷新）。
+    """
     if not edit:
         return
+    if _tab_sel() != idx:
+        _state[_dirty_key(idx)] = True
+        return
     U.SetWindowTextW(edit, txt)
-    e = _state["edit_cur"] if _tab_sel() == 0 else _state["edit_hist"]
-    if edit == e:
-        U.SendMessageW(edit, EM_SETSEL, -1, -1)
-        U.SendMessageW(edit, EM_SCROLLCARET, 0, 0)
+    _scroll_end(edit)
 
 
-def _edit_append(edit, add):
+def _edit_append(edit, add, idx):
     """真流式追加：EM_REPLACESEL 只写增量不重写全文，不打断用户翻阅；
-    光标原本就在末尾时自动跟随滚动。"""
+    光标原本就在末尾时自动跟随滚动。非当前选中页只标脏（见 _edit_reset）。"""
     if not edit or not add:
         return
-    pos = U.SendMessageW(edit, EM_GETSEL, 0, 0)
+    if _tab_sel() != idx:
+        _state[_dirty_key(idx)] = True
+        return
+    s0 = ctypes.c_int()
+    e0 = ctypes.c_int()
+    U.SendMessageW(edit, EM_GETSEL, ctypes.addressof(s0),
+                   ctypes.addressof(e0))
     n = U.SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0)
-    follow = pos >= n
+    follow = e0.value >= n
     U.SendMessageW(edit, EM_SETSEL, n, n)
     # EM_REPLACESEL 的 lParam 是字符串指针；SendMessageW 全局 argtypes
     # 限定 lParam 为整数，故显式传 buffer 地址（同步调用期间 buffer 存活）。
     buf = ctypes.create_unicode_buffer(add)
     U.SendMessageW(edit, EM_REPLACESEL, 0,
                    ctypes.cast(buf, ctypes.c_void_p).value)
-    e = _state["edit_cur"] if _tab_sel() == 0 else _state["edit_hist"]
-    if follow and edit == e:
-        U.SendMessageW(edit, EM_SCROLLCARET, 0, 0)
+    if follow:
+        _scroll_caret(edit)
 
 
 def _safe_decode(b):
@@ -279,8 +348,8 @@ def _log_append():
     pos = _state["log_pos"]
     if size < pos:
         _log_load_full()
-        _edit_reset(_state["edit_cur"], _state["cur_text"])
-        _edit_reset(_state["edit_hist"], _state["hist_text"])
+        _edit_reset(_state["edit_cur"], _state["cur_text"], 0)
+        _edit_reset(_state["edit_hist"], _state["hist_text"], 1)
         return
     if size == pos:
         return
@@ -297,49 +366,49 @@ def _log_append():
     if idx != -1:
         hist_add = _mirror_grow("hist_text", _crlf(text[:idx]))
         if hist_add is None:
-            _edit_reset(_state["edit_hist"], _state["hist_text"])
+            _edit_reset(_state["edit_hist"], _state["hist_text"], 1)
         else:
-            _edit_append(_state["edit_hist"], hist_add)
+            _edit_append(_state["edit_hist"], hist_add, 1)
         cur = _crlf(text[idx:])
         if len(cur) > GUI_TAIL_BYTES:
             cur = cur[-GUI_TAIL_BYTES:]
         _state["cur_text"] = cur
-        _edit_reset(_state["edit_cur"], cur)
+        _edit_reset(_state["edit_cur"], cur, 0)
     else:
         add = _mirror_grow("cur_text", _crlf(text))
         if add is None:
-            _edit_reset(_state["edit_cur"], _state["cur_text"])
+            _edit_reset(_state["edit_cur"], _state["cur_text"], 0)
         else:
-            _edit_append(_state["edit_cur"], add)
+            _edit_append(_state["edit_cur"], add, 0)
 
 
 def _refresh_log():
     """定时刷新（流式）：首次全量加载，此后每轮只把新增字节追加进控件。"""
     if _state["log_pos"] is None:
         _log_load_full()
-        _edit_reset(_state["edit_cur"], _state["cur_text"])
-        _edit_reset(_state["edit_hist"], _state["hist_text"])
+        _edit_reset(_state["edit_cur"], _state["cur_text"], 0)
+        _edit_reset(_state["edit_hist"], _state["hist_text"], 1)
         return
     _log_append()
 
 
-def _tab_sel():
-    """当前选中页索引：控件无选中（-1）等异常一律按第 0 页「当前信息」。"""
-    sel = U.SendMessageW(_state["tab"], TCM_GETCURSEL, 0, 0)
-    return 1 if sel == 1 else 0
-
-
 def _show_tab():
-    """按 Tab 控件选中态切换两页可见性；切换后把可见页滚到末尾。"""
+    """按 Tab 控件选中态切换两页可见性；脏页（隐藏期间积累的增量）
+    显示前全量重设，再把可见页滚到末尾。"""
     idx = _tab_sel()
     if _state["edit_cur"]:
         U.ShowWindow(_state["edit_cur"], SW_SHOW if idx == 0 else SW_HIDE)
     if _state["edit_hist"]:
         U.ShowWindow(_state["edit_hist"], SW_SHOW if idx == 1 else SW_HIDE)
     e = _state["edit_cur"] if idx == 0 else _state["edit_hist"]
-    if e:
-        U.SendMessageW(e, EM_SETSEL, -1, -1)
-        U.SendMessageW(e, EM_SCROLLCARET, 0, 0)
+    if not e:
+        return
+    key = _dirty_key(idx)
+    if _state[key]:
+        _state[key] = False
+        _edit_reset(e, _state[_mirror_key(idx)], idx)
+    else:
+        _scroll_end(e)
 
 
 def _layout():
@@ -348,14 +417,31 @@ def _layout():
         return
     rect = w.RECT()
     U.GetClientRect(gui, ctypes.byref(rect))
-    U.MoveWindow(tab, 0, 0, rect.right - rect.left,
-                 rect.bottom - rect.top, True)
-    r = w.RECT(rect.left, rect.top, rect.right, rect.bottom)
+    cw, ch = rect.right - rect.left, rect.bottom - rect.top
+    m = 6
+    U.MoveWindow(tab, 0, 0, cw, ch, True)
+    r = w.RECT(0, 0, cw, ch)
     U.SendMessageW(tab, TCM_ADJUSTRECT, 0, ctypes.addressof(r))
-    cw, ch = r.right - r.left, r.bottom - r.top
     for e in (_state["edit_cur"], _state["edit_hist"]):
         if e:
-            U.MoveWindow(e, r.left, r.top, cw, ch, True)
+            U.MoveWindow(e, r.left, r.top, r.right - r.left,
+                         r.bottom - r.top, True)
+    # 检索浮层（记事本样式）：Ctrl+F 唤出，覆盖内容区顶部一行；
+    # 默认隐藏（见 _create_gui），隐藏时定位无副作用。
+    if _state["search"]:
+        bh = GUI_SEARCH_BAR_H
+        bw = GUI_BTN_SQ
+        bx_close = r.right - m - bw
+        bx_prev = bx_close - bw
+        bx_next = bx_prev - bw
+        U.MoveWindow(_state["btn_close"], bx_close, r.top + 2,
+                     bw, bh - 4, True)
+        U.MoveWindow(_state["btn_prev"], bx_prev, r.top + 2,
+                     bw, bh - 4, True)
+        U.MoveWindow(_state["btn_next"], bx_next, r.top + 2,
+                     bw, bh - 4, True)
+        U.MoveWindow(_state["search"], r.left + 2, r.top + 2,
+                     bx_next - r.left - m - 2, bh - 4, True)
 
 
 def _restore():
@@ -363,6 +449,7 @@ def _restore():
     if g:
         U.ShowWindow(g, SW_SHOW)
         U.SetForegroundWindow(g)
+        _show_tab()  # 还原后刷新可见页（含隐藏期间积累的脏数据）
 
 
 def _hide():
@@ -372,19 +459,23 @@ def _hide():
         _host_log("window hidden")
 
 
-def _notify(title, text):
-    """缺卡告警双通道：托盘气泡（约 10 秒自消）+ 置顶模态弹窗（不点不消失）。
-
-    NIM_MODIFY + NIF_INFO 只更新气球字段，不动图标注册；弹窗阻塞
-    payload 线程直到点击——00:05 后本无其他任务，无实际影响。
-    """
+def _bubble(title, text, warn):
+    """更新托盘气球字段（NIM_MODIFY + NIF_INFO，只动气球不动图标注册）。"""
     nid = _state["nid"]
     if nid:
         nid.uFlags = NIF_INFO
-        nid.dwInfoFlags = NIIF_WARNING
+        nid.dwInfoFlags = NIIF_WARNING if warn else 0
         nid.szInfoTitle = title[:63]
         nid.szInfo = text[:255]
         S.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+
+
+def _notify(title, text):
+    """缺卡告警双通道：托盘气泡（约 10 秒自消）+ 置顶模态弹窗（不点不消失）。
+
+    弹窗阻塞 payload 线程直到点击——00:05 后本无其他任务，无实际影响。
+    """
+    _bubble(title, text, True)
     _host_log("balloon title=%s text=%s" % (title[:20], text[:40]))
     try:
         U.MessageBoxW(None, text[:1024], title[:63],
@@ -397,13 +488,7 @@ def _notify(title, text):
 
 def _balloon(title, text):
     """轻量气泡提示（设置类操作反馈，不弹模态窗）。"""
-    nid = _state["nid"]
-    if nid:
-        nid.uFlags = NIF_INFO
-        nid.dwInfoFlags = 0
-        nid.szInfoTitle = title[:63]
-        nid.szInfo = text[:255]
-        S.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+    _bubble(title, text, False)
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -554,6 +639,119 @@ def _proc(hwnd, msg, wp, lp):
     return U.DefWindowProcW(hwnd, msg, wp, lp)
 
 
+def _search_show():
+    """Ctrl+F（加速键）唤出检索浮层：内容区顶部浮现搜索栏并聚焦全选。"""
+    for k in ("search", "btn_next", "btn_prev", "btn_close"):
+        h = _state[k]
+        if h:
+            U.ShowWindow(h, SW_SHOW)
+            U.SetWindowPos(h, HWND_TOP, 0, 0, 0, 0,
+                           SWP_NOMOVE | SWP_NOSIZE)  # 提到 Z 序顶防被 EDIT 盖住
+    s = _state["search"]
+    if s:
+        U.SetFocus(s)
+        U.SendMessageW(s, EM_SETSEL, 0, -1)
+    _host_log("search shown")
+
+
+def _search_hide():
+    """关闭检索浮层（Esc 或 ×），焦点还给当前页日志区。"""
+    for k in ("search", "btn_next", "btn_prev", "btn_close"):
+        h = _state[k]
+        if h:
+            U.ShowWindow(h, SW_HIDE)
+    e = _visible_edit()
+    if e:
+        U.SetFocus(e)
+    _host_log("search hidden")
+
+
+def _search_text():
+    """搜索框当前词（去首尾空白）。"""
+    s = _state["search"]
+    if not s:
+        return ""
+    n = U.GetWindowTextLengthW(s)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    U.GetWindowTextW(s, buf, n + 1)
+    return buf.value.strip()
+
+
+def _edit_text(edit):
+    """读出 EDIT 全部文本（WM_GETTEXT 指针参数须显式传缓冲地址）。"""
+    total = U.SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0)
+    if total <= 0:
+        return ""
+    tb = ctypes.create_unicode_buffer(total + 1)
+    U.SendMessageW(edit, WM_GETTEXT, total + 1,
+                   ctypes.cast(tb, ctypes.c_void_p).value)
+    return tb.value
+
+
+def _find_next():
+    """向下查找：从选区末尾起匹配（不区分大小写），到末尾回绕开头。"""
+    edit = _visible_edit()
+    needle = _search_text()
+    if not edit or not needle:
+        return
+    hay = _edit_text(edit).lower()
+    if not hay:
+        _balloon("查找", "当前页无内容")
+        return
+    e0 = ctypes.c_int()
+    U.SendMessageW(edit, EM_GETSEL, 0, ctypes.addressof(e0))
+    ned = needle.lower()
+    hit = hay.find(ned, e0.value)
+    if hit == -1:
+        hit = hay.find(ned)  # 回绕：从开头再找一次
+    if hit == -1:
+        _balloon("查找", "未找到：%s" % needle[:30])
+        _host_log("find-next q=%r miss" % needle[:20])
+        return
+    U.SendMessageW(edit, EM_SETSEL, hit, hit + len(ned))
+    _scroll_caret(edit)
+    _host_log("find-next q=%r hit=%d from=%d len=%d"
+              % (needle[:20], hit, e0.value, len(hay)))
+
+
+def _find_prev():
+    """向上查找：从选区起点向前匹配（不区分大小写），到开头回绕末尾。"""
+    edit = _visible_edit()
+    needle = _search_text()
+    if not edit or not needle:
+        return
+    hay = _edit_text(edit).lower()
+    if not hay:
+        _balloon("查找", "当前页无内容")
+        return
+    s0 = ctypes.c_int()
+    U.SendMessageW(edit, EM_GETSEL, ctypes.addressof(s0), 0)
+    ned = needle.lower()
+    hit = hay.rfind(ned, 0, s0.value)
+    if hit == -1:
+        hit = hay.rfind(ned)  # 回绕：从末尾再找一次
+    if hit == -1:
+        _balloon("查找", "未找到：%s" % needle[:30])
+        _host_log("find-prev q=%r miss" % needle[:20])
+        return
+    U.SendMessageW(edit, EM_SETSEL, hit, hit + len(ned))
+    _scroll_caret(edit)
+    _host_log("find-prev q=%r hit=%d from=%d len=%d"
+              % (needle[:20], hit, s0.value, len(hay)))
+
+
+@WNDPROC
+def _search_proc(hwnd, msg, wp, lp):
+    """搜索框子类化：回车向下查找、Esc 关闭检索栏，其余交回原过程。"""
+    if msg == WM_KEYDOWN and wp == VK_RETURN:
+        _find_next()
+        return 0
+    if msg == WM_KEYDOWN and wp == VK_ESCAPE:
+        _search_hide()
+        return 0
+    return U.CallWindowProcW(_state["search_prev"], hwnd, msg, wp, lp)
+
+
 @WNDPROC
 def _main_proc(hwnd, msg, wp, lp):
     """GUI 主窗口过程：右上角关闭（X）仅隐藏到托盘，不退出程序。"""
@@ -563,6 +761,17 @@ def _main_proc(hwnd, msg, wp, lp):
         return 0
     if msg == WM_SIZE:
         _layout()
+        return 0
+    if msg == WM_COMMAND:
+        cid, code = wp & 0xFFFF, (wp >> 16) & 0xFFFF
+        if cid == GUI_BTN_NEXT and code == BN_CLICKED:
+            _find_next()
+        elif cid == GUI_BTN_PREV and code == BN_CLICKED:
+            _find_prev()
+        elif cid == GUI_BTN_CLOSE and code == BN_CLICKED:
+            _search_hide()
+        elif cid == GUI_ACCEL_FIND:  # Ctrl+F 唤出检索浮层
+            _search_show()
         return 0
     if msg == WM_NOTIFY:
         try:
@@ -643,21 +852,42 @@ def _create_gui(inst, hicon):
     # 标签页插入：显式递增索引（曾两次插 index=0 致默认选中错位）；
     # TCITEMW 必须与 commctrl.h 原型一致（lpReserved 为 UINT，x64 共
     # 40 字节、pszText@16）——此前误声明为 LPARAM 致结构错位、文本恒空。
-    rcs = []
     for idx, name in enumerate(("当前信息", "历史信息")):
         buf = ctypes.create_unicode_buffer(name)
         item = TCITEMW()
         item.mask = 1  # TCIF_TEXT
         item.pszText = ctypes.cast(buf, w.LPWSTR)
         item.cchTextMax = len(name) + 1
-        rcs.append(U.SendMessageW(tab, TCM_INSERTITEMW, idx,
-                                  ctypes.addressof(item)))
+        U.SendMessageW(tab, TCM_INSERTITEMW, idx, ctypes.addressof(item))
+    # 检索浮层（记事本样式，默认隐藏不占空间）：Ctrl+F 唤出、Esc/× 关闭、
+    # ↓/↑ 上下查找、回车即向下查找（回车/Esc 经子类化处理）
+    search = U.CreateWindowExW(WS_EX_CLIENTEDGE, "EDIT", None,
+                               WS_CHILD | ES_AUTOHSCROLL,
+                               0, 0, 0, 0, gui, GUI_EDIT_SEARCH, inst, None)
+    btn_next = U.CreateWindowExW(0, "BUTTON", "↓", WS_CHILD,
+                                 0, 0, 0, 0, gui, GUI_BTN_NEXT, inst, None)
+    btn_prev = U.CreateWindowExW(0, "BUTTON", "↑", WS_CHILD,
+                                 0, 0, 0, 0, gui, GUI_BTN_PREV, inst, None)
+    btn_close = U.CreateWindowExW(0, "BUTTON", "×", WS_CHILD,
+                                  0, 0, 0, 0, gui, GUI_BTN_CLOSE, inst, None)
+    _state["search"] = search
+    _state["btn_next"] = btn_next
+    _state["btn_prev"] = btn_prev
+    _state["btn_close"] = btn_close
     for e in (edit_cur, edit_hist):
         U.SendMessageW(e, WM_SETFONT, hfont, 1)
     # 标签页头指定 Segoe UI（此前一直用 System 默认位图字体，观感差）
     hfont_tab = G.CreateFontW(GUI_TAB_FONT_H, 0, 0, 0, 400, 0, 0, 0,
                               DEFAULT_CHARSET, 0, 0, 0, 0, GUI_TAB_FONT_FACE)
     U.SendMessageW(tab, WM_SETFONT, hfont_tab, 1)
+    U.SendMessageW(search, WM_SETFONT, hfont_tab, 1)
+    for b in (btn_next, btn_prev, btn_close):
+        U.SendMessageW(b, WM_SETFONT, hfont_tab, 1)
+    # 搜索框子类化：回车即时查找。旧窗口过程句柄存 _state，
+    # WNDPROC 回调对象由装饰器持有防 GC。
+    _state["search_prev"] = U.SetWindowLongPtrW(
+        search, GWLP_WNDPROC,
+        ctypes.cast(_search_proc, ctypes.c_void_p).value)
     _layout()
     _center_window(gui)
     U.SetTimer(gui, GUI_TIMER_ID, GUI_TIMER_MS, None)
@@ -753,6 +983,22 @@ def main():
                              ctypes.c_int, w.BOOL]
     U.SendMessageW.restype = LRESULT
     U.SendMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
+    U.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    U.SetWindowLongPtrW.argtypes = [w.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    U.CallWindowProcW.restype = LRESULT
+    U.CallWindowProcW.argtypes = [ctypes.c_void_p, w.HWND, w.UINT,
+                                  w.WPARAM, w.LPARAM]
+    U.SetFocus.restype = w.HWND
+    U.SetFocus.argtypes = [w.HWND]
+    U.GetWindowTextLengthW.restype = ctypes.c_int
+    U.GetWindowTextLengthW.argtypes = [w.HWND]
+    U.GetWindowTextW.restype = ctypes.c_int
+    U.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
+    U.CreateAcceleratorTableW.restype = ctypes.c_void_p
+    U.CreateAcceleratorTableW.argtypes = [ctypes.POINTER(ACCEL), ctypes.c_int]
+    U.TranslateAcceleratorW.restype = ctypes.c_int
+    U.TranslateAcceleratorW.argtypes = [w.HWND, ctypes.c_void_p,
+                                        ctypes.POINTER(MSG)]
     U.SetWindowTextW.restype = w.BOOL
     U.SetWindowTextW.argtypes = [w.HWND, w.LPCWSTR]
     U.GetClientRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
@@ -817,6 +1063,10 @@ def main():
     gui = _create_gui(inst, big_icon)
     _host_log("host ready hwnd=%s tray_add=%s v4=%s gui=%s err=%s"
               % (hwnd, added, versioned, gui, ctypes.get_last_error()))
+    # Ctrl+F 加速键（通用惯例）：焦点在任何控件上都触发，GUI_ACCEL_FIND
+    # 命令经 WM_COMMAND 到达 _main_proc → _search_show（浮层唤出）。
+    acc = ACCEL(FCONTROL | FVIRTKEY, ord("F"), GUI_ACCEL_FIND)
+    haccel = U.CreateAcceleratorTableW(ctypes.byref(acc), 1)
     threading.Thread(target=_payload, daemon=True).start()
     m = MSG()
     while U.GetMessageW(ctypes.byref(m), None, 0, 0) > 0:
@@ -829,6 +1079,8 @@ def main():
                                      APP_MENU, APP_MENU, PM_REMOVE):
                     pass
             continue
+        if haccel and U.TranslateAcceleratorW(gui, haccel, ctypes.byref(m)):
+            continue  # 加速键已派发为 WM_COMMAND，不再 Translate/Dispatch
         U.TranslateMessage(ctypes.byref(m))
         U.DispatchMessageW(ctypes.byref(m))
 
