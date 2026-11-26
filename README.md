@@ -2,7 +2,7 @@
 
 > WorkBuddy 每日积分签到（仅 Windows）。自 v3.0.0 起由**独立后台常驻程序**执行签到，不依赖 WorkBuddy 客户端保持运行、不依赖其内置自动签到、不依赖 WorkBuddy 自动化任务。
 
-- 版本：**v3.2.0**
+- 版本：**v3.3.0**
 - 许可：**MIT**
 - 作者：Jett
 - 平台：Windows 10 / 11
@@ -18,7 +18,7 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 ## 特性
 
 - **独立常驻（无控制台）**：自建 GUI 主窗口（标题 `WorkBuddy 自动签到`，统一图标）内嵌双标签页日志区（雅黑约 12.75pt 只读显示，`当前信息`＝本次运行输出、`历史信息`＝此前运行日志，每 2 秒刷新）＋系统托盘图标（悬浮显示程序名）。**右上角关闭按钮（X）仅隐藏窗口到托盘，程序继续后台运行**；托盘菜单首项为「开机自启动」勾选项（分隔线区分；勾选时写 HKCU Run 注册表值 `WorkBuddyCheckin`，指向当前程序本体，取消即删除；切换后气泡反馈，无需管理员权限），其后为「还原窗口」/「缩小到托盘」/「退出程序」（退出经托盘菜单执行，彻底终止进程）。
-- **双触发点**：每次启动立即**强制发出一次签到请求**（不做状态预检），另于每日 00:05 执行一次常驻兜底（唯一时点，先状态预检幂等）。启动轮次由服务端判定当日是否已签：HTTP 400 + 业务码 10001 记为 `already (server confirmed)`，不视为失败。
+- **双触发点**：每次启动与每日 00:05 各执行一轮，流程完全相同——先状态预检（`checkin-activity-status`）：`today_checked_in=true` 幂等短路记 `already`；`data.active` 显式 `false` 当日放弃；预检不可达或未确认时照常发签到请求兜底（HTTP 400 + 业务码 10001 记为 `already (server confirmed)`，不视为失败）。
 - **凭证单通道**：自解 `$wbEncrypted` 加密信封取当前有效令牌（DPAPI 缓存 → 进程内存扫描 → AES-GCM 自解，过期硬阻断）；失败明确报错，不再静默退回过期备用令牌。原 CDP 兜底（需客户端以调试端口启动，正常部署从不成立）已于 v3.2.0 退役。
 - **完全离线自足**：派生密钥经 Windows 数据保护接口（`CryptProtectData`）按当前用户加密缓存，首次建立后客户端完全关闭也能签到。
 - **设备令牌直发**：签到 POST 尽力附带本地产出的图灵盾设备令牌 `X-Device-Token`——系统 Node 直接加载客户端自带的 N-API 扩展独立产令牌（约 2 秒，不依赖客户端运行）。客户端 2026-11-20 升级后，无令牌的签到会被服务端「当场受理但不入活动日历」（缺卡成因）。令牌不可用时安全退化为无令牌直发。
@@ -53,7 +53,7 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
   └─ 业务 payload.py
         设备令牌：系统 Node 加载客户端图灵 N-API 扩展本地产出（约 2 秒，
                   addon/通道参数走 config.json；不可用则退化无令牌直发）
-        启动触发（force=True）：跳过状态预检，直接签到 POST（附设备令牌）
+        启动触发：状态预检 POST → 幂等短路 → 签到 POST（附设备令牌）
         定时触发（每日 00:05，唯一时点）：状态预检 POST → 幂等短路 → 签到 POST
         结果：200 成功 / 400 + 业务码 10001（服务端确认今日已签）
         复核：查活动日历今日是否真实入账；缺卡重试一次后弹托盘气泡告警
@@ -69,7 +69,7 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 ## 快速开始
 
 1. 确认本机 WorkBuddy 曾正确登录过一次（建立登录态与密钥缓存）。
-2. 确认 `host/` 下的 exe 与 `tray_host.py`、`payload.py`、`wbcredential.py`、`config.json` 五个文件齐全。运行 `host/wb-checkin-host.exe`。GUI 主窗口日志区出现 `daemon started` → `device token ready len=...`（或 `device token unavailable`）→ `checkin ... -> 400 ...` → `startup trigger -> already (server confirmed)` → `verify -> ok (in activity calendar)` → `next run at 次日 00:05:00` 即正常；**每次启动都会真正发出一次签到请求**，当日已签时由服务端返回 400 + 业务码 10001，不视为失败。此后仅在每日 00:05 兜底一轮。
+2. 确认 `host/` 下的 exe 与 `tray_host.py`、`payload.py`、`wbcredential.py`、`config.json` 五个文件齐全。运行 `host/wb-checkin-host.exe`。GUI 主窗口日志区出现 `daemon started` → `device token ready len=...`（或 `device token unavailable`）→ `startup trigger -> already`（当日已签时预检短路，不再发签到 POST；未签时走 `checkin ... -> 200` 成功链）→ `next run at 次日 00:05:00` 即正常；**每次启动先查询服务端签到状态，未签才发签到请求**，当日已签即幂等跳过，不视为失败。此后仅在每日 00:05 兜底一轮。
 3. 点窗口右上角 X 或右键选「缩小到托盘」仅隐藏窗口，程序继续在托盘后台运行；托盘菜单「还原窗口」随时唤回。右键菜单为「开机自启动」（勾选型，首项）+「还原窗口」/「缩小到托盘」/「退出程序」。鼠标悬浮图标会显示程序名 `WorkBuddy 自动签到`。Windows 11 常把新图标收进「隐藏的图标」溢出面板，点任务栏 `^` 展开后找带该提示的图标；如需常驻显示，把它拖到任务栏。
 
 **五文件交付契约**：exe 必须与 `tray_host.py`、`payload.py`、`wbcredential.py`、`config.json` **同目录**，缺一即退出码 2 并弹中文清单诊断窗（无控制台形态下 print 不可见，诊断经系统弹窗呈现）。程序按 `sys.executable`（冻结态）/ `__file__` 动态推导程序目录，源码不含任何绝对目录；五文件可整体改名或搬迁到任意路径（含空格与非 ASCII 目录），日志随新目录生成，无需重装或重打包。无需调试端口、无需桌面快捷方式、无需自动化任务。
@@ -107,7 +107,7 @@ exe 为构筑产物（`host/*.exe` 已被 `.gitignore` 排除），可由上述�
 | `turing_addon_dir` | 客户端图灵 SDK N-API 扩展目录（设备令牌产出源；目录或 node 缺失则退化无令牌直发）。**自动维护**：失效/缺失时程序从客户端安装根动态发现并写回，人工编辑仅作覆盖 |
 | `turing_channel_id` / `turing_product_name` / `turing_product_version` | 图灵 SDK configure 参数。**自动维护**：动态取自客户端安装根的 `cli/product.json`（`turingSdk.channelId` / `applicationName` / `genieVersion`），客户端升级自动跟随 |
 
-签到与状态查询均为 **POST**；状态端点用 GET 一律 404；`checkin-activity-status` 才是真实状态，`checkin-status` 返回全零假状态。定时轮次仅当明确读到 `today_checked_in=true` 时幂等跳过；`data.active` 显式为 `false` 时当日放弃。**启动触发点不做状态预检**，直接发签到请求，由服务端判定当日是否已签（HTTP 400 + 业务码 10001 为正常幂等答复）。
+签到与状态查询均为 **POST**；状态端点用 GET 一律 404；`checkin-activity-status` 才是真实状态，`checkin-status` 返回全零假状态。定时轮次与启动触发均先做状态预检：仅当明确读到 `today_checked_in=true` 时幂等跳过；`data.active` 显式为 `false` 时当日放弃；预检不可达或未确认时照常发签到请求兜底（HTTP 400 + 业务码 10001 为正常幂等答复）。
 
 ---
 

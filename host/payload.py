@@ -392,7 +392,7 @@ def _run(trigger, force=False):
 
 def main():
     log("daemon started")
-    _run("startup", force=True)
+    _run("startup")
     while True:
         target = next_run_at()
         log("next run at " + target.strftime("%Y-%m-%d %H:%M:%S"))
