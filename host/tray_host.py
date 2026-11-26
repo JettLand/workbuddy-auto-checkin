@@ -138,8 +138,14 @@ FCONTROL = 0x08
 GUI_SEARCH_BAR_H = 32  # 检索浮层行高（唤出时日志区让位此高度）
 GUI_BTN_SQ = 34        # 浮层内方形按钮宽高
 ES_NOHIDESEL = 0x100   # 失焦仍显示选区（查找命中高亮在焦点位于搜索框时可见）
-GUI_ST_HINT = 2006     # 浮层内状态提示（未找到等，2 秒自动清除）
-GUI_HINT_W = 72
+GUI_POPUP_PAD_X = 16   # 提示气泡水平内边距（文本两侧）
+GUI_POPUP_PAD_Y = 8    # 提示气泡垂直内边距
+GUI_HINT_CLASS = "WBHintPopup"  # 提示气泡独立顶层窗口类
+SWP_NOACTIVATE = 0x10
+SW_SHOWNA = 8          # 显示但不激活（气泡不抢搜索框焦点）
+WS_BORDER = 0x800000
+SS_CENTER = 0x1
+SS_CENTERIMAGE = 0x200
 EM_GETSEL = 0xB0
 EM_REPLACESEL = 0xC2
 DEFAULT_CHARSET = 1
@@ -180,7 +186,8 @@ APP_MENU = 0x8002
 _state = {"nid": None, "gui": None, "tab": None,
           "edit_cur": None, "edit_hist": None,
           "search": None, "btn_next": None, "btn_prev": None,
-          "btn_close": None, "hint": None, "search_prev": None,
+          "btn_close": None, "hint": None, "hint_popup": None,
+          "hfont_tab": None, "search_prev": None,
           "search_open": False, "miss_at": 0.0,
           "dirty_cur": False, "dirty_hist": False,
           "log_pos": None, "log_carry": b"",
@@ -443,20 +450,18 @@ def _layout():
     if _state["search_open"]:
         bar_h = GUI_SEARCH_BAR_H
         bw = GUI_BTN_SQ
-        # 浮层条：× 贴右，↑↓ 依次向左，提示在其左，搜索框占剩余
+        # 浮层条：× 贴右，↑↓ 依次向左，搜索框占剩余宽度
+        # （未命中提示是独立顶层气泡，不占浮层条布局）
         bx_close = r.right - m - bw
         bx_prev = bx_close - bw
         bx_next = bx_prev - bw
-        bx_hint = bx_next - m - GUI_HINT_W
         y = r.top + 2
         bh = bar_h - 4
         U.MoveWindow(_state["btn_close"], bx_close, y, bw, bh, True)
         U.MoveWindow(_state["btn_prev"], bx_prev, y, bw, bh, True)
         U.MoveWindow(_state["btn_next"], bx_next, y, bw, bh, True)
-        U.MoveWindow(_state["hint"], bx_hint, y,
-                     bx_next - 8 - bx_hint, bh, True)
         U.MoveWindow(_state["search"], r.left + 2, y,
-                     bx_hint - m - (r.left + 2), bh, True)
+                     bx_next - m - (r.left + 2), bh, True)
     else:
         bar_h = 0
     for e in (_state["edit_cur"], _state["edit_hist"]):
@@ -660,29 +665,61 @@ def _proc(hwnd, msg, wp, lp):
     return U.DefWindowProcW(hwnd, msg, wp, lp)
 
 
+@WNDPROC
+def _hint_popup_proc(hwnd, msg, wp, lp):
+    """提示气泡顶层窗口过程：纯转发（文本由内嵌 STATIC 承担）。"""
+    return U.DefWindowProcW(hwnd, msg, wp, lp)
+
+
 def _hint_show(text):
-    """浮层内轻量提示（如「未找到」），2 秒后由定时刷新自动清除——
-    不弹托盘气泡等系统级通知。"""
-    if _state["hint"]:
-        U.SetWindowTextW(_state["hint"], text)
-        _state["miss_at"] = time.monotonic()
+    """未命中提示，复刻记事本：搜索栏下方弹独立顶层气泡（白底细边框、
+    浮在日志内容上、不占浮层条布局、SW_SHOWNA 不抢搜索框焦点），
+    2 秒后由定时刷新自动隐藏。气泡大小按文本自适应。"""
+    popup = _state.get("hint_popup")
+    tip = _state.get("hint")
+    if not (popup and tip):
+        return
+    U.SetWindowTextW(tip, text)
+    buf = ctypes.create_unicode_buffer(text)
+    hdc = U.GetDC(popup)
+    if _state.get("hfont_tab"):
+        G.SelectObject(hdc, _state["hfont_tab"])
+    sz = w.POINT(0, 0)  # SIZE 与 POINT 同布局，GetTextExtentPoint32W 通用
+    G.GetTextExtentPoint32W(hdc, buf, len(text), ctypes.byref(sz))
+    U.ReleaseDC(popup, hdc)
+    pw = sz.x + 2 * GUI_POPUP_PAD_X
+    ph = sz.y + 2 * GUI_POPUP_PAD_Y
+    gui = _state["gui"]
+    rect = w.RECT()
+    U.GetClientRect(gui, ctypes.byref(rect))
+    tr = w.RECT(0, 0, rect.right, rect.bottom)
+    U.SendMessageW(_state["tab"], TCM_ADJUSTRECT, 0, ctypes.addressof(tr))
+    pt = w.POINT((rect.right - rect.left - pw) // 2,
+                 tr.top + GUI_SEARCH_BAR_H + 8)
+    U.ClientToScreen(gui, ctypes.byref(pt))
+    U.MoveWindow(tip, 0, 0, pw, ph, True)
+    U.SetWindowPos(popup, 0, pt.x, pt.y, pw, ph,
+                   SWP_NOZORDER | SWP_NOACTIVATE)
+    U.ShowWindow(popup, SW_SHOWNA)
+    _state["miss_at"] = time.monotonic()
 
 
 def _hint_expire():
     if _state["miss_at"] and time.monotonic() - _state["miss_at"] >= 2.0:
         _state["miss_at"] = 0.0
-        if _state["hint"]:
-            U.SetWindowTextW(_state["hint"], "")
+        if _state.get("hint_popup"):
+            U.ShowWindow(_state["hint_popup"], SW_HIDE)
 
 
 def _search_show():
     """Ctrl+F（加速键）唤出检索浮层：日志区让位一行，浮层条占其顶部。"""
     _state["search_open"] = True
     _layout()  # 先重排（日志区让位），再显示浮层控件
-    for k in ("search", "btn_next", "btn_prev", "btn_close", "hint"):
+    for k in ("search", "btn_next", "btn_prev", "btn_close"):
         h = _state[k]
         if h:
             U.ShowWindow(h, SW_SHOW)
+    # hint 不在此列：仅检索未命中时按需显示（空 STATIC 也占位灰块）
     s = _state["search"]
     if s:
         U.SetFocus(s)
@@ -691,7 +728,7 @@ def _search_show():
     # 裁决布局问题。原点经 MapWindowPoints 映射（GetWindowRect 是屏幕
     # 坐标，直接当客户坐标喂映射会叠加偏移得出假值）。
     geo = []
-    for k in ("search", "btn_next", "btn_prev", "btn_close", "hint"):
+    for k in ("search", "btn_next", "btn_prev", "btn_close", "hint_popup"):
         h = _state[k]
         if not h:
             geo.append((k, None))
@@ -705,14 +742,14 @@ def _search_show():
     _host_log("search shown geo(x,y,w,h)=%s vis=%s"
               % (geo, [bool(U.IsWindowVisible(_state[k]))
                        for k in ("search", "btn_next", "btn_prev",
-                                 "btn_close", "hint")]))
+                                 "btn_close", "hint_popup")]))
 
 
 def _search_hide():
     """关闭检索浮层（Esc 或 ×）：隐藏浮层控件、日志区恢复全高。"""
     _state["search_open"] = False
     _state["miss_at"] = 0.0
-    for k in ("search", "btn_next", "btn_prev", "btn_close", "hint"):
+    for k in ("search", "btn_next", "btn_prev", "btn_close", "hint_popup"):
         h = _state[k]
         if h:
             U.ShowWindow(h, SW_HIDE)
@@ -946,14 +983,31 @@ def _create_gui(inst, hicon):
     btn_close = U.CreateWindowExW(0, "BUTTON", "×",
                                   WS_CHILD,
                                   0, 0, 0, 0, gui, GUI_BTN_CLOSE, inst, None)
+    # 未命中提示气泡（复刻记事本）：独立顶层 popup 窗口（owner=gui，
+    # 不入任务栏、不占浮层条布局，浮在日志内容上），内嵌居中 STATIC
+    # 显示文本。⚠ 不得做成 gui 的子控件——本窗口 z 序反常（标签控件
+    # 位于一切之上），子控件渲染有被标签白底裁死的风险（见 EDIT 处注释）。
+    wcp = WNDCLASSEXW()
+    wcp.cbSize = ctypes.sizeof(WNDCLASSEXW)
+    wcp.lpfnWndProc = _hint_popup_proc
+    wcp.hInstance = inst
+    wcp.hCursor = U.LoadCursorW(None, IDC_ARROW)
+    wcp.hbrBackground = ctypes.c_void_p(6)  # (HBRUSH)(COLOR_WINDOW+1)
+    wcp.lpszClassName = GUI_HINT_CLASS
+    U.RegisterClassExW(ctypes.byref(wcp))
+    hint_popup = U.CreateWindowExW(0, GUI_HINT_CLASS, None,
+                                   WS_POPUP | WS_BORDER,
+                                   0, 0, 0, 0, gui, None, inst, None)
     hint = U.CreateWindowExW(0, "STATIC", None,
-                             WS_CHILD,
-                             0, 0, 0, 0, gui, GUI_ST_HINT, inst, None)
+                             WS_CHILD | WS_VISIBLE | SS_CENTER
+                             | SS_CENTERIMAGE,
+                             0, 0, 0, 0, hint_popup, None, inst, None)
     _state["search"] = search
     _state["btn_next"] = btn_next
     _state["btn_prev"] = btn_prev
     _state["btn_close"] = btn_close
     _state["hint"] = hint
+    _state["hint_popup"] = hint_popup
     for e in (edit_cur, edit_hist):
         U.SendMessageW(e, WM_SETFONT, hfont, 1)
     # 标签页头指定 Segoe UI（此前一直用 System 默认位图字体，观感差）
@@ -964,6 +1018,7 @@ def _create_gui(inst, hicon):
     for b in (btn_next, btn_prev, btn_close):
         U.SendMessageW(b, WM_SETFONT, hfont_tab, 1)
     U.SendMessageW(hint, WM_SETFONT, hfont_tab, 1)
+    _state["hfont_tab"] = hfont_tab  # 提示气泡测量文本宽度用
     # 搜索框子类化：回车即时查找。旧窗口过程句柄存 _state，
     # WNDPROC 回调对象由装饰器持有防 GC。
     _state["search_prev"] = U.SetWindowLongPtrW(
