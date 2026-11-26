@@ -391,6 +391,10 @@ def _refresh_log():
         _log_load_full()
         _edit_reset(_state["edit_cur"], _state["cur_text"], 0)
         _edit_reset(_state["edit_hist"], _state["hist_text"], 1)
+        # 首载自证：两页字符数与读取位置——空白屏回归时判定文本是否载入
+        _host_log("first load cur=%d hist=%d pos=%s"
+                  % (len(_state["cur_text"]), len(_state["hist_text"]),
+                     _state["log_pos"]))
         return
     _log_append()
 
@@ -431,6 +435,11 @@ def _layout():
     U.MoveWindow(tab, 0, 0, cw, ch, True)
     r = w.RECT(0, 0, cw, ch)
     U.SendMessageW(tab, TCM_ADJUSTRECT, 0, ctypes.addressof(r))
+    if not _state.get("layout_logged"):
+        _state["layout_logged"] = True
+        # 首次布局自证：空白屏回归时区分「几何异常」与「文本未载入」
+        _host_log("layout cw=%d ch=%d r=(%d,%d,%d,%d)"
+                  % (cw, ch, r.left, r.top, r.right, r.bottom))
     if _state["search_open"]:
         bar_h = GUI_SEARCH_BAR_H
         bw = GUI_BTN_SQ
@@ -890,14 +899,19 @@ def _create_gui(inst, hicon):
                             0, 0, GUI_W, GUI_H,
                             None, None, inst, None)
     tab = U.CreateWindowExW(0, "SysTabControl32", None,
-                            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                            WS_CHILD | WS_VISIBLE,
                             0, 0, 0, 0, gui, None, inst, None)
     _state["gui"] = gui
     _state["tab"] = tab
     # ES_NOHIDESEL：查找命中后焦点仍在搜索框，EDIT 失焦默认隐藏选区
-    # 会使命中高亮不可见（表现＝查找"无反应"）；WS_CLIPSIBLINGS：兄弟
-    # 控件重绘互相裁剪，防浮层与 EDIT 重叠期闪烁透视。
-    style = (WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_VSCROLL
+    # 会使命中高亮不可见（表现＝查找"无反应"）。
+    # ⚠ 本窗口所有子控件一律不加 WS_CLIPSIBLINGS：真机实测 z 序中
+    # 标签控件位于一切之上（GW_CHILD 首个＝SysTabControl32），任何
+    # 带此样式的控件绘制时都会裁掉"上方兄弟"＝被标签白底裁死而
+    # 永不显示（2026-11-26 全空白回归根因：EDIT 与检索浮层同病灶）。
+    # 重叠已由让位布局从根上消除，绘制先后由 _layout 移动顺序
+    # （tab→浮层→EDIT）天然保证，无需 CLIPSIBLINGS。
+    style = (WS_CHILD | WS_VISIBLE | WS_VSCROLL
              | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_NOHIDESEL)
     edit_cur = U.CreateWindowExW(0, "EDIT", None, style,
                                  0, 0, 0, 0, gui, None, inst, None)
@@ -921,19 +935,19 @@ def _create_gui(inst, hicon):
     # 检索浮层（记事本样式，默认隐藏不占空间）：Ctrl+F 唤出、Esc/× 关闭、
     # ↓/↑ 上下查找、回车即向下查找（回车/Esc 经子类化处理）
     search = U.CreateWindowExW(WS_EX_CLIENTEDGE, "EDIT", None,
-                               WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL,
+                               WS_CHILD | ES_AUTOHSCROLL,
                                0, 0, 0, 0, gui, GUI_EDIT_SEARCH, inst, None)
     btn_next = U.CreateWindowExW(0, "BUTTON", "↓",
-                                 WS_CHILD | WS_CLIPSIBLINGS,
+                                 WS_CHILD,
                                  0, 0, 0, 0, gui, GUI_BTN_NEXT, inst, None)
     btn_prev = U.CreateWindowExW(0, "BUTTON", "↑",
-                                 WS_CHILD | WS_CLIPSIBLINGS,
+                                 WS_CHILD,
                                  0, 0, 0, 0, gui, GUI_BTN_PREV, inst, None)
     btn_close = U.CreateWindowExW(0, "BUTTON", "×",
-                                  WS_CHILD | WS_CLIPSIBLINGS,
+                                  WS_CHILD,
                                   0, 0, 0, 0, gui, GUI_BTN_CLOSE, inst, None)
     hint = U.CreateWindowExW(0, "STATIC", None,
-                             WS_CHILD | WS_CLIPSIBLINGS,
+                             WS_CHILD,
                              0, 0, 0, 0, gui, GUI_ST_HINT, inst, None)
     _state["search"] = search
     _state["btn_next"] = btn_next
@@ -1152,6 +1166,8 @@ def main():
             continue  # 加速键已派发为 WM_COMMAND，不再 Translate/Dispatch
         U.TranslateMessage(ctypes.byref(m))
         U.DispatchMessageW(ctypes.byref(m))
+    # 消息循环退出自证：静默退出（非托盘「退出程序」）在此留痕
+    _host_log("host loop ended (WM_QUIT or GetMessageW error)")
 
 
 if __name__ == "__main__":
