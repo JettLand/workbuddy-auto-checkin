@@ -18,6 +18,23 @@ C = ctypes.WinDLL("comctl32", use_last_error=True)
 LRESULT = ctypes.c_ssize_t
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
 
+# ⚠ ctypes 签名固化：64 位进程里窗口/GDI 句柄与栈地址常超 32 位 c_int
+# 范围，无签名的 ctypes 调用传 `addressof(buf)`/句柄时会随机抛
+# OverflowError（2026-11-26 提示气泡 ArgumentError 实证——回调内异常
+# 被吞即表现为「无反应」假象）。对涉及句柄/缓冲地址的高频函数显式
+# 声明签名，全文件所有地址传参调用点一次性安全化。
+U.SendMessageW.restype = LRESULT
+U.SendMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
+U.GetDC.restype = w.HDC
+U.GetDC.argtypes = [w.HWND]
+U.ReleaseDC.argtypes = [w.HWND, w.HDC]
+G.SelectObject.argtypes = [w.HDC, w.HANDLE]
+G.GetTextExtentPoint32W.argtypes = [w.HDC, w.LPCWSTR, ctypes.c_int,
+                                    ctypes.POINTER(w.POINT)]
+U.ClientToScreen.argtypes = [w.HWND, ctypes.POINTER(w.POINT)]
+U.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int,
+                           ctypes.c_int, ctypes.c_int, w.UINT]
+
 
 class WNDCLASSEXW(ctypes.Structure):
     _fields_ = [
@@ -675,9 +692,19 @@ def _hint_show(text):
     """未命中提示，复刻记事本：搜索栏下方弹独立顶层气泡（白底细边框、
     浮在日志内容上、不占浮层条布局、SW_SHOWNA 不抢搜索框焦点），
     2 秒后由定时刷新自动隐藏。气泡大小按文本自适应。"""
+    try:
+        _hint_show_impl(text)
+    except Exception as e:
+        # 窗口过程回调内异常会被吞掉（onefile exe 无 stderr），不显式
+        # 落盘日志则表现为「无反应」假象——必须显式留痕。
+        _host_log("hint show failed: %r" % (e,))
+
+
+def _hint_show_impl(text):
     popup = _state.get("hint_popup")
     tip = _state.get("hint")
     if not (popup and tip):
+        _host_log("hint show skip: popup=%r tip=%r" % (popup, tip))
         return
     U.SetWindowTextW(tip, text)
     buf = ctypes.create_unicode_buffer(text)
@@ -787,6 +814,8 @@ def _find_next():
     """向下查找：从选区末尾起匹配（不区分大小写），到末尾回绕开头。"""
     edit = _visible_edit()
     needle = _search_text()
+    _host_log("find-next enter edit=%r needle=%r"
+              % (edit, needle[:20]))
     if not edit or not needle:
         return
     hay = _edit_text(edit).lower()
