@@ -1,4 +1,6 @@
 {
+  "entry_script": "tray_host.py",
+  "required_files": ["payload.py", "wbcredential.py"],
   "api_base": "https://copilot.tencent.com/v2",
   "turing_addon_dir": "D:/Program Files/WorkBuddy/resources/app.asar.unpacked/native/turing-sdk",
   "turing_channel_id": 109144,

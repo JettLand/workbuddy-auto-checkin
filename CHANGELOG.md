@@ -4,6 +4,13 @@
 
 ---
 
+## [3.4.0] — 2026-11-26
+
+**方案 B 配置化入口：改名/增删外置脚本零重打包（阁主裁定）**
+
+- `config.json` 新增 `entry_script`（引导器加载入口，缺省 `tray_host.py`）与 `required_files`（入口外必需清单，缺省 `["payload.py","wbcredential.py"]`）。`boot.py` 改读程序同目录 config 决定加载目标，入口自动纳入缺失检查（去重）；缺 config / JSON 损坏 / 顶层非对象 / 字段类型非法 / 文件名含路径分隔符或 `..` 一律中文弹窗诊断＋退出码 2（fail-closed），旧 config 无新字段时回退内置默认保持兼容。今后**改名或增删外置脚本只改配置，不再重打包**（本次 boot.py 自身变化一次性重打包）。`build.py` 的 `icon_to_temp()` 同步改为从 config 指定入口提取 `TICON_B64`，打包链不因入口改名断裂；`HIDDEN` 已含 `json` 无需改依赖清单。README 六处（版本/特性/架构图/配置表/排障/文件结构）＋源码运行段同步。副本隔离探针七项全绿（配置发现/旧配置回退/缺文件/路径穿越/JSON 损坏/顶层非对象/图标源跟随），冻结态 exe 冒烟见下方验证。
+- **验证**：`py_compile` rc=0；副本探针 7/7 PASS（fail-closed 均实测 exit 2＋中文诊断文案）；回源 sha256 三文件一致；重打包后 exe 冒烟 `daemon started` → `startup trigger -> already` → `next run`，无 `Traceback` / `ModuleNotFoundError`。
+
 ## [3.3.0] — 2026-11-26
 
 **启动触发复用定时触发流程：先查服务端状态，未签才发签到（阁主令）**

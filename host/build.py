@@ -15,6 +15,7 @@
 目录加载）；仅 boot.py 自身或 Python 依赖集合变化时才运行本脚本。
 """
 import base64
+import json
 import os
 import re
 import shutil
@@ -30,10 +31,20 @@ HIDDEN = ["cryptography", "ctypes", "ctypes.wintypes", "shutil", "time",
 
 
 def icon_to_temp():
-    src = open(os.path.join(BASE, "tray_host.py"), encoding="utf-8").read()
+    # 图标字节源随入口脚本走（入口名由 config.json 指定）。
+    try:
+        with open(os.path.join(BASE, "config.json"), "r",
+                  encoding="utf-8-sig") as f:
+            entry = (json.load(f) or {}).get("entry_script") or "tray_host.py"
+    except Exception:
+        entry = "tray_host.py"
+    if not (isinstance(entry, str) and entry == os.path.basename(entry)
+            and ".." not in entry):
+        raise RuntimeError("config.json 的 entry_script 不是合法的同类目录文件名")
+    src = open(os.path.join(BASE, entry), encoding="utf-8").read()
     m = re.search(r'TICON_B64\s*=\s*\(\s*"([^"]+)"', src)
     if not m:
-        raise RuntimeError("tray_host.py 缺少 TICON_B64（图标字节源）")
+        raise RuntimeError(entry + " 缺少 TICON_B64（图标字节源）")
     d = tempfile.mkdtemp(prefix="wb_icon_")
     ico = os.path.join(d, "icon.ico")
     open(ico, "wb").write(base64.b64decode(m.group(1)))

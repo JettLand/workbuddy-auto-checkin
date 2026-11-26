@@ -2,7 +2,7 @@
 
 > WorkBuddy 每日积分签到（仅 Windows）。自 v3.0.0 起由**独立后台常驻程序**执行签到，不依赖 WorkBuddy 客户端保持运行、不依赖其内置自动签到、不依赖 WorkBuddy 自动化任务。
 
-- 版本：**v3.3.0**
+- 版本：**v3.4.0**
 - 许可：**MIT**
 - 作者：Jett
 - 平台：Windows 10 / 11
@@ -25,7 +25,7 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 - **缺卡复核告警**：每次签到后复核活动日历（`checkin-activity-status` 真实状态源）是否真实入账，缺卡间隔重试一次仍缺则弹托盘气泡提醒补签——无论令牌是否生效都不会静默缺卡。
 - **签到成功提示**：签到受理成功（HTTP 200 首签/重试成功）时输出明确成功日志（`checkin SUCCESS: credit +N, streak M days`）并弹托盘信息气泡「今日积分 +N，连续签到 M 天」；`already`（当日早已签过）不弹泡以免骚扰，告警类弹窗保持警告样式不变。
 - **网络失败当日重试**：签到因网络异常（连接失败/超时，结果归为 `error`）时当日有限重试——间隔＝10 分钟×重试次数（10/20/…/60 分钟，上限 6 次，累计约 3.5 小时）；等待将跨过下一定时点（00:05）时提前让位避免阻塞定时触发；全部失败发系统模态置顶弹窗，点掉弹窗后主循环恢复，若已过 00:05 即自动补签。
-- **薄引导器 + 全外置**：exe 只冻结十余行 `boot.py`，界面壳、业务、凭证三份 `.py` 全部由 `runpy` 运行时加载；**任何代码改动只需替换对应 `.py`，无需重新打包 exe**。
+- **薄引导器 + 全外置**：exe 只冻结 `boot.py`，界面壳、业务、凭证三份 `.py` 全部由 `runpy` 运行时加载；入口脚本名与必需文件清单由 `config.json` 的 `entry_script` / `required_files` 指定——**改名或增删外置脚本只改配置、零重打包**；仅 boot.py 自身或 Python 依赖集合变化才需重打包。
 - **路径动态推导**：按 exe 自身位置定位外置脚本、配置与日志，源码无写死目录；五文件可整体搬迁到任意路径（含空格与非 ASCII 目录）。
 - **运行可见**：业务日志写 `logs/daemon.log` 并由 GUI 主窗口实时滚动展示每轮结果与下次运行时间。
 
@@ -36,9 +36,10 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 ```
 后台常驻程序（host/：exe + 3 份外置 .py + config.json，共 5 文件，单一目录交付）
   │
-  ├─ wb-checkin-host.exe  ← 仅冻结 boot.py（十余行）
+  ├─ wb-checkin-host.exe  ← 仅冻结 boot.py
   │     BASE = dirname(sys.executable if frozen else __file__)
-  │     └─ runpy.run_path(BASE/tray_host.py)   ← 动态定位，无写死路径
+  │     └─ 读 BASE/config.json → runpy.run_path(BASE/entry_script)
+  │        （入口与必需清单由配置指定，缺字段回退默认，非法值 fail-closed 弹窗退出 2）
   │
   ├─ 界面壳 tray_host.py（外置，可热替换）
   │     GUI 主窗口（日志实时展示，X 仅隐藏）+ 托盘
@@ -81,8 +82,9 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 python host/payload.py
 
 # 仅当修改 boot.py 本身、Python 依赖集合或 exe 图标资源时才需重打包。
+# 入口/必需文件清单由 config.json 指定：改名或增删外置脚本只改配置，无需重打包。
 # 一键脚本 host/build.py 自动完成全部步骤，零手工记忆依赖：
-#   1. 从 tray_host.py 内嵌常量 TICON_B64 解码出完整 ICO 字节，落临时目录生成
+#   1. 从 config.json 指定的入口脚本内嵌常量 TICON_B64 解码出完整 ICO 字节，落临时目录生成
 #      icon.ico（与托盘图标同源；不依赖 Pillow，磁盘不保留图片文件）
 #   2. 以固化参数调 PyInstaller 打包（hidden-import 清单、--icon、--collect-all）
 #   3. 打包后即删临时 ico 与 build/、spec 中间产物；exe 直接产出到 host/
@@ -96,10 +98,12 @@ exe 为构筑产物（`host/*.exe` 已被 `.gitignore` 排除），可由上述�
 
 ## 配置
 
-配置读**程序同目录** `config.json`（源真值＝运行目录同一份 `host/config.json`），可用 `WB_CHECKIN_CONFIG` 覆盖；图灵 SDK 扩展目录可用 `WB_CHECKIN_TURING_ADDON` 覆盖；密钥缓存路径可用 `WB_CHECKIN_KEYCACHE` 覆盖（默认 `%LOCALAPPDATA%\WorkBuddyCheckin\keycache.json`）。
+配置读**程序同目录** `config.json`（源真值＝运行目录同一份 `host/config.json`），可用 `WB_CHECKIN_CONFIG` 覆盖；图灵 SDK 扩展目录可用 `WB_CHECKIN_TURING_ADDON` 覆盖；密钥缓存路径可用 `WB_CHECKIN_KEYCACHE` 覆盖（默认 `%LOCALAPPDATA%\WorkBuddyCheckin\keycache.json`）。**引导器例外**：`entry_script` / `required_files` 由冻结的 `boot.py` 固定读程序同目录 `config.json`（bootstrap 必须先定位清单文件），不受 `WB_CHECKIN_CONFIG` 覆盖。
 
 | 字段 | 说明 |
 |---|---|
+| `entry_script` | 引导器加载的入口脚本名（同目录纯文件名）；缺省 `tray_host.py`。改名只需改此项＋实际文件，无需重打包 exe |
+| `required_files` | 入口之外的必需外置文件清单（同目录纯文件名）；缺省 `["payload.py", "wbcredential.py"]`。入口名自动纳入缺失检查；含路径分隔符或 `..` 一律 fail-closed 弹窗退出 2 |
 | `api_base` | 接口根地址 |
 | `checkin_paths` | 签到 POST 路径候选 |
 | `checkin_status_paths` | 状态预检与复核 POST 路径候选 |
@@ -121,7 +125,7 @@ exe 为构筑产物（`host/*.exe` 已被 `.gitignore` 排除），可由上述�
 | 现象 | 处置 |
 |---|---|
 | exe 启动后秒退、退出码 1、两份日志均无新增 | 引导器模式的依赖收集缺口：PyInstaller 只静态分析 `boot.py`，外置脚本运行时加载的模块未冻结（`ModuleNotFoundError`，典型 `ctypes.wintypes`）。运行 `host/build.py` 重打包（清单已固化），改 `.py` 无效 |
-| 搬迁目录后无法启动 / 弹「启动失败」诊断窗 | 五文件必须同目录；程序按 exe 自身位置动态推导，源码无写死路径。仅复制 exe 会以退出码 2 弹窗列出缺失文件清单与当前程序目录 |
+| 搬迁目录后无法启动 / 弹「启动失败」诊断窗 | exe、`config.json` 及配置所列入口与必需文件必须同目录；程序按 exe 自身位置动态推导，源码无写死目录。诊断窗按配置清单动态列出缺失文件与当前程序目录（退出码 2）；配置损坏、入口名含 `../` 等非法值同样弹窗明确报错 |
 | 主窗口日志区空白 | 确认 `payload.py` 与 exe 同目录且未损坏；日志文件在 `logs/daemon.log`，首次签到前可能尚未生成 |
 | 退出后托盘残留失效图标 | 壳退出分支的 `NIM_DELETE` 必须为官方值 `2`；误写为 `1` 实为 `NIM_MODIFY`，只改图标不删除（`os._exit(0)` 掩盖了该问题） |
 | 到点未签到或触发时点不符 | 定时点为 `SCHEDULE` 唯一项 00:05，`next_run_at()` 返回绝对时刻，`next run at` 须精确到 `T00:05:00`；每 6 小时触发或 `00:04:59` 均为旧缺陷 |
@@ -155,8 +159,8 @@ workbuddy-auto-checkin/
 ├── CHANGELOG.md             # 版本变化明细
 ├── .gitignore               # 排除运行态与构筑物
 └── host/                    # 现行执行体（v3.2.0 起纯后台程序，无技能形态）
-    ├── boot.py                # 薄引导器（唯一被冻结的入口，路径动态推导）
-    ├── config.json            # 端点 / 请求头 / 图灵 SDK 参数（源真值）
+    ├── boot.py                # 薄引导器（唯一被冻结的入口，路径动态推导；入口/清单读 config）
+    ├── config.json            # 入口与必需清单 / 端点 / 请求头 / 图灵 SDK 参数（源真值）
     ├── tray_host.py           # GUI 主窗口壳 + 托盘 + 告警/成功通知（外置，可热替换）
     ├── wbcredential.py        # 凭证单通道 + 密钥缓存（外置）
     ├── payload.py             # 定时签到业务 + 设备令牌 + 缺卡复核（外置）
