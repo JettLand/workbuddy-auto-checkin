@@ -77,6 +77,7 @@ WS_POPUP = 0x80000000
 WS_VISIBLE = 0x10000000
 WS_EX_TOOLWINDOW = 0x80
 WS_CHILD = 0x40000000
+WS_CLIPSIBLINGS = 0x04000000
 WS_OVERLAPPEDWINDOW = 0x00CF0000
 WS_VSCROLL = 0x200000
 ES_MULTILINE = 4
@@ -134,10 +135,11 @@ GUI_EDIT_SEARCH = 2004
 GUI_ACCEL_FIND = 2005  # Ctrl+F 加速键命令 ID
 FVIRTKEY = 0x01
 FCONTROL = 0x08
-GUI_SEARCH_BAR_H = 32  # 检索浮层行高
+GUI_SEARCH_BAR_H = 32  # 检索浮层行高（唤出时日志区让位此高度）
 GUI_BTN_SQ = 34        # 浮层内方形按钮宽高
-HWND_TOP = 0
-SWP_NOMOVE = 0x2
+ES_NOHIDESEL = 0x100   # 失焦仍显示选区（查找命中高亮在焦点位于搜索框时可见）
+GUI_ST_HINT = 2006     # 浮层内状态提示（未找到等，2 秒自动清除）
+GUI_HINT_W = 72
 EM_GETSEL = 0xB0
 EM_REPLACESEL = 0xC2
 DEFAULT_CHARSET = 1
@@ -178,7 +180,8 @@ APP_MENU = 0x8002
 _state = {"nid": None, "gui": None, "tab": None,
           "edit_cur": None, "edit_hist": None,
           "search": None, "btn_next": None, "btn_prev": None,
-          "btn_close": None, "search_prev": None,
+          "btn_close": None, "hint": None, "search_prev": None,
+          "search_open": False, "miss_at": 0.0,
           "dirty_cur": False, "dirty_hist": False,
           "log_pos": None, "log_carry": b"",
           "cur_text": "", "hist_text": "",
@@ -412,6 +415,12 @@ def _show_tab():
 
 
 def _layout():
+    """按窗口尺寸与检索浮层开合重排。
+
+    浮层打开时日志区让出顶部一行高度（记事本语义：检索栏占独立行，
+    不覆盖日志文本），浮层条与日志区互不重叠，从根上消除遮挡与
+    重绘闪烁透视；关闭时日志区恢复全高（Ctrl+F 唤出才占位）。
+    """
     gui, tab = _state["gui"], _state["tab"]
     if not gui or not tab:
         return
@@ -422,26 +431,29 @@ def _layout():
     U.MoveWindow(tab, 0, 0, cw, ch, True)
     r = w.RECT(0, 0, cw, ch)
     U.SendMessageW(tab, TCM_ADJUSTRECT, 0, ctypes.addressof(r))
-    for e in (_state["edit_cur"], _state["edit_hist"]):
-        if e:
-            U.MoveWindow(e, r.left, r.top, r.right - r.left,
-                         r.bottom - r.top, True)
-    # 检索浮层（记事本样式）：Ctrl+F 唤出，覆盖内容区顶部一行；
-    # 默认隐藏（见 _create_gui），隐藏时定位无副作用。
-    if _state["search"]:
-        bh = GUI_SEARCH_BAR_H
+    if _state["search_open"]:
+        bar_h = GUI_SEARCH_BAR_H
         bw = GUI_BTN_SQ
+        # 浮层条：× 贴右，↑↓ 依次向左，提示在其左，搜索框占剩余
         bx_close = r.right - m - bw
         bx_prev = bx_close - bw
         bx_next = bx_prev - bw
-        U.MoveWindow(_state["btn_close"], bx_close, r.top + 2,
-                     bw, bh - 4, True)
-        U.MoveWindow(_state["btn_prev"], bx_prev, r.top + 2,
-                     bw, bh - 4, True)
-        U.MoveWindow(_state["btn_next"], bx_next, r.top + 2,
-                     bw, bh - 4, True)
-        U.MoveWindow(_state["search"], r.left + 2, r.top + 2,
-                     bx_next - r.left - m - 2, bh - 4, True)
+        bx_hint = bx_next - m - GUI_HINT_W
+        y = r.top + 2
+        bh = bar_h - 4
+        U.MoveWindow(_state["btn_close"], bx_close, y, bw, bh, True)
+        U.MoveWindow(_state["btn_prev"], bx_prev, y, bw, bh, True)
+        U.MoveWindow(_state["btn_next"], bx_next, y, bw, bh, True)
+        U.MoveWindow(_state["hint"], bx_hint, y,
+                     bx_next - 8 - bx_hint, bh, True)
+        U.MoveWindow(_state["search"], r.left + 2, y,
+                     bx_hint - m - (r.left + 2), bh, True)
+    else:
+        bar_h = 0
+    for e in (_state["edit_cur"], _state["edit_hist"]):
+        if e:
+            U.MoveWindow(e, r.left, r.top + bar_h, r.right - r.left,
+                         r.bottom - r.top - bar_h, True)
 
 
 def _restore():
@@ -639,30 +651,67 @@ def _proc(hwnd, msg, wp, lp):
     return U.DefWindowProcW(hwnd, msg, wp, lp)
 
 
+def _hint_show(text):
+    """浮层内轻量提示（如「未找到」），2 秒后由定时刷新自动清除——
+    不弹托盘气泡等系统级通知。"""
+    if _state["hint"]:
+        U.SetWindowTextW(_state["hint"], text)
+        _state["miss_at"] = time.monotonic()
+
+
+def _hint_expire():
+    if _state["miss_at"] and time.monotonic() - _state["miss_at"] >= 2.0:
+        _state["miss_at"] = 0.0
+        if _state["hint"]:
+            U.SetWindowTextW(_state["hint"], "")
+
+
 def _search_show():
-    """Ctrl+F（加速键）唤出检索浮层：内容区顶部浮现搜索栏并聚焦全选。"""
-    for k in ("search", "btn_next", "btn_prev", "btn_close"):
+    """Ctrl+F（加速键）唤出检索浮层：日志区让位一行，浮层条占其顶部。"""
+    _state["search_open"] = True
+    _layout()  # 先重排（日志区让位），再显示浮层控件
+    for k in ("search", "btn_next", "btn_prev", "btn_close", "hint"):
         h = _state[k]
         if h:
             U.ShowWindow(h, SW_SHOW)
-            U.SetWindowPos(h, HWND_TOP, 0, 0, 0, 0,
-                           SWP_NOMOVE | SWP_NOSIZE)  # 提到 Z 序顶防被 EDIT 盖住
     s = _state["search"]
     if s:
         U.SetFocus(s)
         U.SendMessageW(s, EM_SETSEL, 0, -1)
-    _host_log("search shown")
+    # 几何自证：记录浮层各控件在主窗口客户区的位置与可见性，供真机
+    # 裁决布局问题。原点经 MapWindowPoints 映射（GetWindowRect 是屏幕
+    # 坐标，直接当客户坐标喂映射会叠加偏移得出假值）。
+    geo = []
+    for k in ("search", "btn_next", "btn_prev", "btn_close", "hint"):
+        h = _state[k]
+        if not h:
+            geo.append((k, None))
+            continue
+        rc = w.RECT()
+        U.GetWindowRect(h, ctypes.byref(rc))
+        pt = w.POINT(0, 0)
+        U.MapWindowPoints(h, _state["gui"], ctypes.byref(pt), 1)
+        geo.append((k, (pt.x, pt.y, rc.right - rc.left,
+                        rc.bottom - rc.top)))
+    _host_log("search shown geo(x,y,w,h)=%s vis=%s"
+              % (geo, [bool(U.IsWindowVisible(_state[k]))
+                       for k in ("search", "btn_next", "btn_prev",
+                                 "btn_close", "hint")]))
 
 
 def _search_hide():
-    """关闭检索浮层（Esc 或 ×），焦点还给当前页日志区。"""
-    for k in ("search", "btn_next", "btn_prev", "btn_close"):
+    """关闭检索浮层（Esc 或 ×）：隐藏浮层控件、日志区恢复全高。"""
+    _state["search_open"] = False
+    _state["miss_at"] = 0.0
+    for k in ("search", "btn_next", "btn_prev", "btn_close", "hint"):
         h = _state[k]
         if h:
             U.ShowWindow(h, SW_HIDE)
+    _layout()
     e = _visible_edit()
     if e:
         U.SetFocus(e)
+        _scroll_end(e)
     _host_log("search hidden")
 
 
@@ -696,7 +745,7 @@ def _find_next():
         return
     hay = _edit_text(edit).lower()
     if not hay:
-        _balloon("查找", "当前页无内容")
+        _hint_show("无内容")
         return
     e0 = ctypes.c_int()
     U.SendMessageW(edit, EM_GETSEL, 0, ctypes.addressof(e0))
@@ -705,9 +754,12 @@ def _find_next():
     if hit == -1:
         hit = hay.find(ned)  # 回绕：从开头再找一次
     if hit == -1:
-        _balloon("查找", "未找到：%s" % needle[:30])
+        _hint_show("未找到")
         _host_log("find-next q=%r miss" % needle[:20])
         return
+    _state["miss_at"] = 0.0
+    if _state["hint"]:
+        U.SetWindowTextW(_state["hint"], "")
     U.SendMessageW(edit, EM_SETSEL, hit, hit + len(ned))
     _scroll_caret(edit)
     _host_log("find-next q=%r hit=%d from=%d len=%d"
@@ -722,7 +774,7 @@ def _find_prev():
         return
     hay = _edit_text(edit).lower()
     if not hay:
-        _balloon("查找", "当前页无内容")
+        _hint_show("无内容")
         return
     s0 = ctypes.c_int()
     U.SendMessageW(edit, EM_GETSEL, ctypes.addressof(s0), 0)
@@ -731,9 +783,12 @@ def _find_prev():
     if hit == -1:
         hit = hay.rfind(ned)  # 回绕：从末尾再找一次
     if hit == -1:
-        _balloon("查找", "未找到：%s" % needle[:30])
+        _hint_show("未找到")
         _host_log("find-prev q=%r miss" % needle[:20])
         return
+    _state["miss_at"] = 0.0
+    if _state["hint"]:
+        U.SetWindowTextW(_state["hint"], "")
     U.SendMessageW(edit, EM_SETSEL, hit, hit + len(ned))
     _scroll_caret(edit)
     _host_log("find-prev q=%r hit=%d from=%d len=%d"
@@ -786,6 +841,7 @@ def _main_proc(hwnd, msg, wp, lp):
     if msg == WM_TIMER and wp == GUI_TIMER_ID:
         try:
             _refresh_log()
+            _hint_expire()  # 浮层提示 2 秒自动清除
         except Exception as e:
             _host_log("gui refresh failed: %r" % (e,))
         return 0
@@ -834,12 +890,15 @@ def _create_gui(inst, hicon):
                             0, 0, GUI_W, GUI_H,
                             None, None, inst, None)
     tab = U.CreateWindowExW(0, "SysTabControl32", None,
-                            WS_CHILD | WS_VISIBLE,
+                            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                             0, 0, 0, 0, gui, None, inst, None)
     _state["gui"] = gui
     _state["tab"] = tab
-    style = (WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE
-             | ES_AUTOVSCROLL | ES_READONLY)
+    # ES_NOHIDESEL：查找命中后焦点仍在搜索框，EDIT 失焦默认隐藏选区
+    # 会使命中高亮不可见（表现＝查找"无反应"）；WS_CLIPSIBLINGS：兄弟
+    # 控件重绘互相裁剪，防浮层与 EDIT 重叠期闪烁透视。
+    style = (WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_VSCROLL
+             | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_NOHIDESEL)
     edit_cur = U.CreateWindowExW(0, "EDIT", None, style,
                                  0, 0, 0, 0, gui, None, inst, None)
     edit_hist = U.CreateWindowExW(0, "EDIT", None,
@@ -862,18 +921,25 @@ def _create_gui(inst, hicon):
     # 检索浮层（记事本样式，默认隐藏不占空间）：Ctrl+F 唤出、Esc/× 关闭、
     # ↓/↑ 上下查找、回车即向下查找（回车/Esc 经子类化处理）
     search = U.CreateWindowExW(WS_EX_CLIENTEDGE, "EDIT", None,
-                               WS_CHILD | ES_AUTOHSCROLL,
+                               WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL,
                                0, 0, 0, 0, gui, GUI_EDIT_SEARCH, inst, None)
-    btn_next = U.CreateWindowExW(0, "BUTTON", "↓", WS_CHILD,
+    btn_next = U.CreateWindowExW(0, "BUTTON", "↓",
+                                 WS_CHILD | WS_CLIPSIBLINGS,
                                  0, 0, 0, 0, gui, GUI_BTN_NEXT, inst, None)
-    btn_prev = U.CreateWindowExW(0, "BUTTON", "↑", WS_CHILD,
+    btn_prev = U.CreateWindowExW(0, "BUTTON", "↑",
+                                 WS_CHILD | WS_CLIPSIBLINGS,
                                  0, 0, 0, 0, gui, GUI_BTN_PREV, inst, None)
-    btn_close = U.CreateWindowExW(0, "BUTTON", "×", WS_CHILD,
+    btn_close = U.CreateWindowExW(0, "BUTTON", "×",
+                                  WS_CHILD | WS_CLIPSIBLINGS,
                                   0, 0, 0, 0, gui, GUI_BTN_CLOSE, inst, None)
+    hint = U.CreateWindowExW(0, "STATIC", None,
+                             WS_CHILD | WS_CLIPSIBLINGS,
+                             0, 0, 0, 0, gui, GUI_ST_HINT, inst, None)
     _state["search"] = search
     _state["btn_next"] = btn_next
     _state["btn_prev"] = btn_prev
     _state["btn_close"] = btn_close
+    _state["hint"] = hint
     for e in (edit_cur, edit_hist):
         U.SendMessageW(e, WM_SETFONT, hfont, 1)
     # 标签页头指定 Segoe UI（此前一直用 System 默认位图字体，观感差）
@@ -883,6 +949,7 @@ def _create_gui(inst, hicon):
     U.SendMessageW(search, WM_SETFONT, hfont_tab, 1)
     for b in (btn_next, btn_prev, btn_close):
         U.SendMessageW(b, WM_SETFONT, hfont_tab, 1)
+    U.SendMessageW(hint, WM_SETFONT, hfont_tab, 1)
     # 搜索框子类化：回车即时查找。旧窗口过程句柄存 _state，
     # WNDPROC 回调对象由装饰器持有防 GC。
     _state["search_prev"] = U.SetWindowLongPtrW(
@@ -1008,6 +1075,8 @@ def main():
     U.SetWindowPos.restype = w.BOOL
     U.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int,
                                ctypes.c_int, ctypes.c_int, w.UINT]
+    U.MapWindowPoints.restype = ctypes.c_int
+    U.MapWindowPoints.argtypes = [w.HWND, w.HWND, ctypes.c_void_p, w.UINT]
     K.CreateMutexW.restype = w.HANDLE
     K.CreateMutexW.argtypes = [ctypes.c_void_p, w.BOOL, w.LPCWSTR]
     G.CreateFontW.restype = ctypes.c_void_p
