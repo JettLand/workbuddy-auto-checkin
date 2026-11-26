@@ -34,7 +34,7 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 ## 架构概览
 
 ```
-后台常驻程序（host/dist/：exe + 3 份外置 .py + config.json，共 5 文件）
+后台常驻程序（host/：exe + 3 份外置 .py + config.json，共 5 文件，单一目录交付）
   │
   ├─ wb-checkin-host.exe  ← 仅冻结 boot.py（十余行）
   │     BASE = dirname(sys.executable if frozen else __file__)
@@ -69,7 +69,7 @@ v2.4.1 及之前读取本机**明文**登录态 `workbuddy-desktop.info` 取令�
 ## 快速开始
 
 1. 确认本机 WorkBuddy 曾正确登录过一次（建立登录态与密钥缓存）。
-2. 确认 `host/dist/` 下的 exe 与 `tray_host.py`、`payload.py`、`wbcredential.py`、`config.json` 五个文件齐全。运行 `host/dist/wb-checkin-host.exe`。GUI 主窗口日志区出现 `daemon started` → `device token ready len=...`（或 `device token unavailable`）→ `checkin ... -> 400 ...` → `startup trigger -> already (server confirmed)` → `verify -> ok (in activity calendar)` → `next run at 次日 00:05:00` 即正常；**每次启动都会真正发出一次签到请求**，当日已签时由服务端返回 400 + 业务码 10001，不视为失败。此后仅在每日 00:05 兜底一轮。
+2. 确认 `host/` 下的 exe 与 `tray_host.py`、`payload.py`、`wbcredential.py`、`config.json` 五个文件齐全。运行 `host/wb-checkin-host.exe`。GUI 主窗口日志区出现 `daemon started` → `device token ready len=...`（或 `device token unavailable`）→ `checkin ... -> 400 ...` → `startup trigger -> already (server confirmed)` → `verify -> ok (in activity calendar)` → `next run at 次日 00:05:00` 即正常；**每次启动都会真正发出一次签到请求**，当日已签时由服务端返回 400 + 业务码 10001，不视为失败。此后仅在每日 00:05 兜底一轮。
 3. 点窗口右上角 X 或右键选「缩小到托盘」仅隐藏窗口，程序继续在托盘后台运行；托盘菜单「还原窗口」随时唤回。右键菜单为「开机自启动」（勾选型，首项）+「还原窗口」/「缩小到托盘」/「退出程序」。鼠标悬浮图标会显示程序名 `WorkBuddy 自动签到`。Windows 11 常把新图标收进「隐藏的图标」溢出面板，点任务栏 `^` 展开后找带该提示的图标；如需常驻显示，把它拖到任务栏。
 
 **五文件交付契约**：exe 必须与 `tray_host.py`、`payload.py`、`wbcredential.py`、`config.json` **同目录**，缺一即退出码 2 并弹中文清单诊断窗（无控制台形态下 print 不可见，诊断经系统弹窗呈现）。程序按 `sys.executable`（冻结态）/ `__file__` 动态推导程序目录，源码不含任何绝对目录；五文件可整体改名或搬迁到任意路径（含空格与非 ASCII 目录），日志随新目录生成，无需重装或重打包。无需调试端口、无需桌面快捷方式、无需自动化任务。
@@ -85,19 +85,18 @@ python host/payload.py
 #   1. 从 tray_host.py 内嵌常量 TICON_B64 解码出完整 ICO 字节，落临时目录生成
 #      icon.ico（与托盘图标同源；不依赖 Pillow，磁盘不保留图片文件）
 #   2. 以固化参数调 PyInstaller 打包（hidden-import 清单、--icon、--collect-all）
-#   3. 打包后即删临时 ico 与 build/、spec 中间产物
-#   4. 自动同步 dist 外置文件并逐个 sha256 校验
+#   3. 打包后即删临时 ico 与 build/、spec 中间产物；exe 直接产出到 host/
 # 须用带 PyInstaller 的解释器执行；打包前若目标 exe 正在运行会 fail-closed 提示先退出
 <python-with-pyinstaller> host/build.py
 ```
 
-`host/dist/` 为构筑产物，已被 `.gitignore` 排除，可由上述命令重建。漏配 `--hidden-import` 的典型症状是 exe 秒退、退出码 1、零日志、`ModuleNotFoundError: ctypes.wintypes`——此问题**不能靠改外置 `.py` 修复**，须重打包（`build.py` 已固化完整清单）。
+exe 为构筑产物（`host/*.exe` 已被 `.gitignore` 排除），可由上述命令重建；exe 与外置脚本同目录即交付形态，改外置脚本无需重打包。漏配 `--hidden-import` 的典型症状是 exe 秒退、退出码 1、零日志、`ModuleNotFoundError: ctypes.wintypes`——此问题**不能靠改外置 `.py` 修复**，须重打包（`build.py` 已固化完整清单）。
 
 ---
 
 ## 配置
 
-配置读**程序同目录** `config.json`（源真值 `host/config.json`，随交付复制进 `host/dist/`），可用 `WB_CHECKIN_CONFIG` 覆盖；图灵 SDK 扩展目录可用 `WB_CHECKIN_TURING_ADDON` 覆盖；密钥缓存路径可用 `WB_CHECKIN_KEYCACHE` 覆盖（默认 `%LOCALAPPDATA%\WorkBuddyCheckin\keycache.json`）。
+配置读**程序同目录** `config.json`（源真值＝运行目录同一份 `host/config.json`），可用 `WB_CHECKIN_CONFIG` 覆盖；图灵 SDK 扩展目录可用 `WB_CHECKIN_TURING_ADDON` 覆盖；密钥缓存路径可用 `WB_CHECKIN_KEYCACHE` 覆盖（默认 `%LOCALAPPDATA%\WorkBuddyCheckin\keycache.json`）。
 
 | 字段 | 说明 |
 |---|---|
@@ -116,8 +115,8 @@ python host/payload.py
 
 | 文件 | 内容 |
 |---|---|
-| `host/dist/logs/daemon.log` | 每轮签到结果、POST 状态码、下次运行时间、异常堆栈摘要 |
-| `host/dist/logs/host.log` | 图标注册标志与版本、托盘消息码及来源、菜单命令与返回值、启动/退出记录 |
+| `host/logs/daemon.log` | 每轮签到结果、POST 状态码、下次运行时间、异常堆栈摘要 |
+| `host/logs/host.log` | 图标注册标志与版本、托盘消息码及来源、菜单命令与返回值、启动/退出记录 |
 
 | 现象 | 处置 |
 |---|---|
@@ -161,8 +160,8 @@ workbuddy-auto-checkin/
     ├── tray_host.py           # GUI 主窗口壳 + 托盘 + 告警/成功通知（外置，可热替换）
     ├── wbcredential.py        # 凭证单通道 + 密钥缓存（外置）
     ├── payload.py             # 定时签到业务 + 设备令牌 + 缺卡复核（外置）
-    ├── build.py               # 一键重打包脚本（图标自动随包 + dist 同步校验）
-    └── dist/                  # gitignored 构筑产物，五文件交付契约
+    ├── build.py               # 一键重打包脚本（图标自动随包，exe 产出本目录）
+    └── wb-checkin-host.exe    # gitignored 构筑产物，与外置脚本同目录即交付
         ├── wb-checkin-host.exe # 仅冻结 boot.py
         ├── tray_host.py       # 与源码同步，可热替换
         ├── payload.py         # 与源码同步，可热替换
@@ -176,7 +175,7 @@ workbuddy-auto-checkin/
 
 本方案在本机读取自身登录态，由独立后台程序直接调用签到接口，属个人设备本地自动化：不修改客户端、不绕过登录鉴权、明文令牌不落盘。仅供**个人学习与自用**，请遵守 WorkBuddy 服务条款与平台规则；若官方明确禁止此类自动化，请立即停止使用。请勿用于批量刷取或侵犯他人权益。
 
-> **分发提示**：本项目以私有仓库分发，规避公开分发条款。企业微信 `notify.webhook_url` 即群写入权限，**切勿提交到公开仓库**。`state/`、`logs/`、`dist/`、`build/`、`*.spec`、`__pycache__/` 已被 `.gitignore` 排除。
+> **分发提示**：本项目以私有仓库分发，规避公开分发条款。企业微信 `notify.webhook_url` 即群写入权限，**切勿提交到公开仓库**。`state/`、`logs/`、`host/*.exe`、`build/`、`*.spec`、`__pycache__/` 已被 `.gitignore` 排除。
 
 ---
 

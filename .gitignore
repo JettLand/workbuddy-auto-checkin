@@ -7,7 +7,7 @@ __pycache__/
 *.pyc
 
 # 构建产物（可由打包命令重新生成，无需入库）
-dist/
+host/*.exe
 build/
 *.spec
 
