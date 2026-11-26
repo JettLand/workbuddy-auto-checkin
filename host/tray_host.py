@@ -242,9 +242,33 @@ def _scroll_caret(edit):
     U.SendMessageW(edit, EM_SCROLLCARET, 0, 0)
 
 
+def _repaint_now(edit):
+    """按「标签先画、EDIT 后画」强制立即重绘（切页/整页重设后调用）。
+
+    本窗口 z 序反常：标签控件位于一切子控件之上且覆盖整个客户区，
+    切页隐藏旧页时暴露区域会触发标签控件重绘白底；若 EDIT 先画了
+    文本，标签其后派发的白底绘制会把内容盖住（＝切页白屏、再切一次
+    才出内容；无 WS_CLIPSIBLINGS 下最后写者胜出，2026-11-26 实测定
+    案）。故先同步刷完标签的待绘制区域，再让 EDIT 最后重绘，顺序
+    唯一确定。
+    """
+    if _state.get("tab"):
+        U.UpdateWindow(_state["tab"])  # 先排空标签控件的白底绘制
+    U.InvalidateRect(edit, None, True)
+    U.UpdateWindow(edit)
+
+
 def _scroll_end(edit):
-    """选中全部文本并把光标置于末尾滚动到视野（整页重设后使用）。"""
-    U.SendMessageW(edit, EM_SETSEL, -1, -1)
+    """把光标置于文本末尾并滚入视野（整页重设后使用）。
+
+    ⚠ 不可用惯常的 EM_SETSEL(-1,-1)「全选到尾」：文件头 argtypes 已把
+    WPARAM 固化为无符号 c_size_t，-1 会被包装成 2^64-1，EDIT 控件不再
+    识别为「选到末尾」而静默忽略（2026-11-26 切页/首载不滚到底的根因）。
+    故显式取文本长度作为末尾位置；光标定位在末尾单个位置，避免整页
+    反白选区（ES_NOHIDESEL 下失焦也可见）。
+    """
+    n = U.SendMessageW(edit, WM_GETTEXTLENGTH, 0, 0)
+    U.SendMessageW(edit, EM_SETSEL, n, n)
     _scroll_caret(edit)
 
 
@@ -282,6 +306,7 @@ def _edit_reset(edit, txt, idx):
         return
     U.SetWindowTextW(edit, txt)
     _scroll_end(edit)
+    _repaint_now(edit)
 
 
 def _edit_append(edit, add, idx):
@@ -440,6 +465,7 @@ def _show_tab():
         _edit_reset(e, _state[_mirror_key(idx)], idx)
     else:
         _scroll_end(e)
+        _repaint_now(e)
 
 
 def _layout():
