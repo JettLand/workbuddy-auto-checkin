@@ -2,7 +2,7 @@
 """一键重打包脚本（图标与外置文件零记忆依赖）。
 
 流程：
-  1. 从 tray_host.py 内嵌常量 TICON_B64 解码出完整 ICO 字节，
+  1. 从 config.json 指定的入口脚本内嵌常量 TICON_B64 解码出完整 ICO 字节，
      落临时目录生成 icon.ico（不依赖 Pillow、不新增图片文件）；
   2. 以固化参数调 PyInstaller 重打包 exe（--icon 指向临时 ico），
      exe 直接产出到本目录（与外置脚本同目录，单一目录交付）；
@@ -25,6 +25,7 @@ import tempfile
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 NAME = "wb-checkin-host"
+DEFAULT_ENTRY = "tray_host.py"
 HIDDEN = ["cryptography", "ctypes", "ctypes.wintypes", "shutil", "time",
           "urllib.request", "urllib.error", "json", "base64", "hashlib",
           "re", "subprocess", "threading", "datetime", "runpy"]
@@ -35,9 +36,9 @@ def icon_to_temp():
     try:
         with open(os.path.join(BASE, "config.json"), "r",
                   encoding="utf-8-sig") as f:
-            entry = (json.load(f) or {}).get("entry_script") or "tray_host.py"
+            entry = (json.load(f) or {}).get("entry_script") or DEFAULT_ENTRY
     except Exception:
-        entry = "tray_host.py"
+        entry = DEFAULT_ENTRY
     if not (isinstance(entry, str) and entry == os.path.basename(entry)
             and ".." not in entry):
         raise RuntimeError("config.json 的 entry_script 不是合法的同类目录文件名")
