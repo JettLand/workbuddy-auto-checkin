@@ -368,7 +368,13 @@ def _mirror_grow(key, txt):
 
 
 def _log_load_full():
-    """全量加载（首次/日志轮转时）：按最后一个 daemon started 切分两页。"""
+    """全量加载（首次/日志轮转时）：当前页置空起步，历史页取最后一个 daemon started 之前的内容。
+
+    首载发生在 payload 线程写出本轮 daemon started 之前（_create_gui 先于
+    payload 线程启动）——若按最后一个 marker 切当前页，必然命中上一轮残留，
+    表现为「先显示上一轮日志、本轮 marker 出现后再整页重设」。改为空白起步：
+    历史页照留，当前页等本轮 marker 出现由 _log_append 建立，其后逐条流式追加。
+    """
     p = _log_path()
     data = b""
     try:
@@ -385,13 +391,14 @@ def _log_load_full():
         _state["log_pos"] = 0
     text = _crlf(data.decode("utf-8", "replace"))
     idx = text.rfind(LOG_MARKER)
-    _state["cur_text"] = text[idx:] if idx != -1 else text
+    _state["cur_text"] = ""  # 首载空白：当前页只接收本轮启动后的流式日志
     _state["hist_text"] = text[:idx] if idx != -1 else ""
 
 
 def _log_append():
-    """流式追加：只读新增字节；出现新 daemon started 时换页（标记前
-    追加进历史页、标记起重置当前页）。日志变短视为轮转，全量重载。"""
+    """流式追加：只读新增字节增量写入当前页；若新增中出现 daemon started，
+    标记前的内容归历史页、标记起的本轮内容流式追加到当前页（首载已置空）。
+    日志变短视为轮转，全量重载。"""
     p = _log_path()
     try:
         size = os.path.getsize(p)
@@ -421,17 +428,12 @@ def _log_append():
             _edit_reset(_state["edit_hist"], _state["hist_text"], 1)
         else:
             _edit_append(_state["edit_hist"], hist_add, 1)
-        cur = _crlf(text[idx:])
-        if len(cur) > GUI_TAIL_BYTES:
-            cur = cur[-GUI_TAIL_BYTES:]
-        _state["cur_text"] = cur
-        _edit_reset(_state["edit_cur"], cur, 0)
+        text = text[idx:]
+    add = _mirror_grow("cur_text", _crlf(text))
+    if add is None:
+        _edit_reset(_state["edit_cur"], _state["cur_text"], 0)
     else:
-        add = _mirror_grow("cur_text", _crlf(text))
-        if add is None:
-            _edit_reset(_state["edit_cur"], _state["cur_text"], 0)
-        else:
-            _edit_append(_state["edit_cur"], add, 0)
+        _edit_append(_state["edit_cur"], add, 0)
 
 
 def _refresh_log():
