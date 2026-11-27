@@ -49,6 +49,13 @@ class _MBI(ctypes.Structure):
 
 _B64_32 = re.compile(rb"[A-Za-z0-9+/]{43}=")
 _MAX_SCAN = 900 * 1024 * 1024
+# 内存 JWT 降级通道（v3.7.0）：JWT 三段式结构特征，仅 3 字节前缀 eyJ 本身
+# 无唯一性，须过 payload JSON + exp 校验才采信（防命令行字面量回显假命中）。
+_JWT_RE = re.compile(rb"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_SIG_BYTES = {"RS256": 256, "RS384": 384, "RS512": 512,
+              "ES256": 64, "ES384": 96, "ES512": 132}
+_DRIFT_MARKERS = ("加密套件或密钥标识不匹配", "登录态字段不是 $wbEncrypted 加密信封")
+_LAST_IDENTITY_SOURCE = "dpapi"  # 最近一次 get_identity 的凭证来源，供 payload 记日志
 
 
 def _pids():
@@ -210,6 +217,97 @@ def _decrypt(field, key):
     return plain.decode("utf-8")
 
 
+def _b64url_decode(seg):
+    """base64url 解码（自动补 padding），失败返回 None。"""
+    try:
+        raw = seg.encode("ascii") if isinstance(seg, str) else seg
+        return base64.urlsafe_b64decode(raw + b"=" * (-len(raw) % 4))
+    except Exception:
+        return None
+
+
+def _parse_jwt_candidate(token):
+    """解析 JWT 候选 → (exp, 规范 token)；结构或 exp 不合法返回 None。
+
+    应对取证中的 1516 邻接变体：正则贪婪可能把令牌尾部邻接的 base64url
+    字符吃进签名段，按 alg 对应的签名字节数截断回正确长度——多一个字符
+    服务端即 401，故必须精确还原。
+    """
+    parts = token.split(b".")
+    if len(parts) != 3 or not parts[0].startswith(b"eyJ"):
+        return None
+    header = _b64url_decode(parts[0])
+    payload = _b64url_decode(parts[1])
+    if header is None or payload is None:
+        return None
+    try:
+        alg = (json.loads(header) or {}).get("alg")
+        claims = json.loads(payload) or {}
+    except Exception:
+        return None
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)) or exp <= time.time():
+        return None
+    sig = parts[2]
+    want = _SIG_BYTES.get(alg)
+    if want:
+        # 规范 base64url 无 padding 长度；邻接多一字符会被正则吃进签名段，
+        # 必须精确截断（343 与 342 字符都能解出 256 字节，靠解码长度判不出）。
+        expect_len = 4 * ((want + 2) // 3) - ((3 - want % 3) % 3)
+        if len(sig) < expect_len:
+            return None
+        sig = sig[:expect_len]
+    return exp, b".".join((parts[0], parts[1], sig)).decode("ascii")
+
+
+def _extract_memory_jwt():
+    """从客户端进程内存提取当前有效明文 JWT；无候选返回 None。
+
+    仅在主路遭遇协议漂移错误时调用——完全绕开加密信封协议。候选须过
+    JWT 结构解析 + 未过期 exp 校验；并存多版本时取 exp 最大者（取证：
+    内存同时有 4 个不同 exp 的令牌，取首个命中会拿到旧令牌）。令牌不落盘、
+    不写日志（只由 payload 记来源与长度）。
+    """
+    best = None
+    for pid in _pids():
+        h = _k.OpenProcess(0x0410, False, pid)
+        if not h:
+            continue
+        total = 0
+        try:
+            addr = 0
+            mbi = _MBI()
+            while addr < 0x7FFFFFFFFFFF and total < _MAX_SCAN:
+                if _k.VirtualQueryEx(h, ctypes.c_void_p(addr),
+                                     ctypes.cast(ctypes.byref(mbi), ctypes.c_void_p),
+                                     ctypes.sizeof(mbi)) == 0:
+                    break
+                size = mbi.Size or 0x1000
+                base = mbi.Base or 0
+                prot = mbi.Protect or 0
+                if (mbi.State == 0x1000 and prot and not (prot & 0x101)
+                        and 0 < size <= 32 * 1024 * 1024):
+                    data = _read(h, base, min(size, 32 * 1024 * 1024))
+                    total += len(data)
+                    for m in _JWT_RE.finditer(data):
+                        parsed = _parse_jwt_candidate(m.group())
+                        if parsed and (best is None or parsed[0] > best[0]):
+                            best = parsed
+                nxt = base + size
+                if nxt <= addr:
+                    break
+                addr = nxt
+        finally:
+            _k.CloseHandle(h)
+    return best[1] if best else None
+
+
+def _is_protocol_drift(exc):
+    """仅识别两个精确协议漂移文案；其它失败原样抛出，不掩盖真问题。"""
+    text = str(exc)
+    return any(marker in text for marker in _DRIFT_MARKERS)
+
+
 def route_a():
     with open(AUTH_FILE, "r", encoding="utf-8-sig") as f:
         obj = json.load(f)
@@ -242,14 +340,38 @@ def token_expiry(cfg):
 
 
 def get_identity():
-    """单一凭证通道：DPAPI 缓存 → 进程内存扫描 → AES-GCM 自解。
+    """凭证双通道：主路 DPAPI 自解；协议漂移时降级提取内存明文 JWT。
 
+    主路：DPAPI 缓存 → 进程内存扫描取 atRestSecretKey → AES-GCM 自解。
+    降级：仅当主路抛协议漂移类错误（套件/keyId 不符、信封格式变更）时，
+          从客户端进程内存直接取明文 JWT——完全绕开加密信封协议，客户端
+          升级加密方案不再导致签到失败。其它错误（过期/无密钥/文件读失败）
+          原样抛出，不降级、不掩盖真问题。
     原 CDP 兜底（route_b）已于 v3.2.0 退役——其触发前提（客户端以
-    --remote-debugging-port 启动）在正常部署中从不成立，实测 2026-11-24
-    现实环境不可用，兜底名存实亡；A 路失败时明确报错，不静默。
+    --remote-debugging-port 启动）在正常部署中从不成立。
     """
+    global _LAST_IDENTITY_SOURCE
     try:
-        return route_a()
+        token, uid, domain = route_a()
+        _LAST_IDENTITY_SOURCE = "dpapi"
+        return token, uid, domain
     except Exception as exc:
-        raise RuntimeError("取登录态失败（%s: %s）| 需客户端曾登录并在本机运行过一次"
-                           % (type(exc).__name__, exc)) from exc
+        if not _is_protocol_drift(exc):
+            _LAST_IDENTITY_SOURCE = "dpapi"
+            raise RuntimeError("取登录态失败（%s: %s）| 需客户端曾登录并在本机运行过一次"
+                               % (type(exc).__name__, exc)) from exc
+        token = _extract_memory_jwt()
+        if not token:
+            _LAST_IDENTITY_SOURCE = "dpapi"
+            raise RuntimeError(
+                "取登录态失败（%s: %s）| 内存 JWT 降级亦失败（无有效未过期候选）"
+                % (type(exc).__name__, exc)) from exc
+        _LAST_IDENTITY_SOURCE = "memory-jwt"
+        try:
+            with open(AUTH_FILE, "r", encoding="utf-8-sig") as f:
+                obj = json.load(f)
+            uid = (obj.get("account") or {}).get("uid") or ""
+            domain = (obj.get("auth") or {}).get("domain") or "www.workbuddy.cn"
+        except Exception:
+            uid, domain = "", "www.workbuddy.cn"
+        return token, uid, domain

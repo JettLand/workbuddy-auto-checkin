@@ -305,6 +305,7 @@ def run_once():
         log("login token expiry: unavailable")
     _warn_token_expiry(deadline, remain)
     token, uid, domain = wbcredential.get_identity()
+    log("identity source: %s" % wbcredential._LAST_IDENTITY_SOURCE)
     base = (cfg.get("api_base") or "").rstrip("/")
     headers = checkin_headers(cfg, device_token(cfg))
     if headers.get("X-Device-Token"):
