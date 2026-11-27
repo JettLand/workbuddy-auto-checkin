@@ -18,6 +18,7 @@ CONFIG_FILE = os.environ.get("WB_CHECKIN_CONFIG") or os.path.join(
 LOG = os.path.join(BASE, "logs", "daemon.log")
 SCHEDULE = [(0, 5)]
 RETRY_MAX = 6  # 网络类失败当日重试上限；间隔 10min*次数（累计约 3.5h）
+_EXPIRY_WARNED = False  # 登录令牌到期预警的进程内去重标记
 
 
 def log(msg):
@@ -244,9 +245,40 @@ def _announce_success(text):
             log("success balloon ERROR %s: %s" % (type(e).__name__, e))
 
 
+def _warn_token_expiry(cfg):
+    """登录令牌到期预警：剩余 ≤1 天时弹窗提醒（进程内只提醒一次）。
+
+    有效期取自登录态明文 expiresAt（毫秒时间戳），非服务端检测——服务端
+    实际是否认可另由 checkin-activity-status 的 401/403 判定。客户端有
+    refreshToken 自动续期，临近到期多为客户端长期未运行，提醒用户启动
+    一次客户端刷新登录态。
+    """
+    global _EXPIRY_WARNED
+    if _EXPIRY_WARNED:
+        return
+    exp = wbcredential.token_expiry(cfg)
+    if not exp:
+        return
+    remain = (exp / 1000 - time.time()) / 86400
+    if remain < 0 or remain > 1:
+        return
+    _EXPIRY_WARNED = True
+    log("token expiry warning: %.2f days remaining" % remain)
+    notify = globals().get("_tray_notify")
+    if notify:
+        try:
+            notify("WorkBuddy 自动签到",
+                   "登录令牌将在 1 天内到期（剩余 %.1f 天），签到可能失败。"
+                   "请启动并登录一次 WorkBuddy 客户端以刷新登录态。" % remain)
+            log("alert -> tray balloon sent (token expiry)")
+        except Exception as e:
+            log("token expiry alert ERROR %s: %s" % (type(e).__name__, e))
+
+
 def run_once():
     with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
         cfg = json.load(f)
+    _warn_token_expiry(cfg)
     token, uid, domain = wbcredential.get_identity()
     base = (cfg.get("api_base") or "").rstrip("/")
     headers = checkin_headers(cfg, device_token(cfg))
@@ -254,10 +286,19 @@ def run_once():
         log("device token ready len=%d" % len(headers["X-Device-Token"]))
     else:
         log("device token unavailable; posting without it")
+    # 服务端有效期检测：状态端点（复用同一 Bearer）若齐全地以 401/403
+    # 拒绝、且无任何 200，判登录令牌在服务端已失效——提前短路，不发无效
+    # 签到 POST。网络错误 code=0 不参与判定；任一 200 即视为令牌有效。
+    auth_rejected = False
+    auth_accepted = False
     for path in cfg.get("checkin_status_paths") or []:
         code, text = post(base + path, token, uid, domain, cfg.get("auth_headers"))
+        if code in (401, 403):
+            auth_rejected = True
+            continue
         if code != 200:
             continue
+        auth_accepted = True
         try:
             data = (json.loads(text) or {}).get("data") or {}
         except Exception:
@@ -267,6 +308,9 @@ def run_once():
         if data.get("today_checked_in") is True:
             return "already"
         break
+    if auth_rejected and not auth_accepted:
+        log("token validity -> invalid (server 401/403 on status endpoints)")
+        return "token_invalid"
     for path in cfg.get("checkin_paths") or []:
         code, text = post(base + path, token, uid, domain, headers)
         log("checkin %s -> %s %s" % (path, code, text[:160]))
@@ -367,6 +411,20 @@ def _run(trigger):
     try:
         result = run_once()
         log("%s trigger -> %s" % (trigger, result))
+        if result == "token_invalid":
+            # 服务端已明确拒签（登录令牌失效），重试与复核都无意义——
+            # 直接弹窗告知刷新登录态；模态窗阻塞 payload 线程无碍。
+            notify = globals().get("_tray_notify")
+            if notify:
+                try:
+                    notify("WorkBuddy 自动签到",
+                           "登录令牌在服务端已失效（签到状态查询返回 401/403），"
+                           "今日签到未发出。请启动并登录一次 WorkBuddy 客户端"
+                           "刷新登录态后重启本程序。")
+                    log("alert -> tray balloon sent (token invalid)")
+                except Exception as e:
+                    log("alert ERROR %s: %s" % (type(e).__name__, e))
+            return
         if result == "error":
             result = _retry_network()
         if result in ("ok", "already (server confirmed)"):

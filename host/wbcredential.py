@@ -227,6 +227,20 @@ def route_a():
     return token, uid, domain
 
 
+def token_expiry(cfg):
+    """返回登录令牌到期毫秒时间戳（auth.expiresAt）；读取失败返回 0。
+
+    只读登录态明文字段，不解密令牌、不发网络请求——供到期预警判断
+    剩余天数。真正的服务端有效性由 payload 的状态查询 401/403 判定。
+    """
+    try:
+        with open(AUTH_FILE, "r", encoding="utf-8-sig") as f:
+            obj = json.load(f)
+        return (obj.get("auth") or {}).get("expiresAt") or 0
+    except Exception:
+        return 0
+
+
 def get_identity():
     """单一凭证通道：DPAPI 缓存 → 进程内存扫描 → AES-GCM 自解。
 

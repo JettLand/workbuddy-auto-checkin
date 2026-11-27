@@ -4,6 +4,16 @@
 
 ---
 
+## [3.5.0] — 2026-11-27
+
+**令牌有效期双检测（阁主裁定：登录令牌 Bearer + 到期预警弹窗）**
+
+- **服务端有效性检测**：`payload.run_once()` 状态预检循环新增判定——若所有 `checkin_status_paths` 均以 `401/403` 拒绝且无任何 `200`，记 `token validity -> invalid (server 401/403 on status endpoints)` 并返回新结果 `token_invalid`；`_run()` 对该结果弹系统模态告警告知刷新登录态后重启，并**直接短路**——不发无效签到 POST、不进网络重试、不进活动日历复核。网络错误 `code=0` 不参与判定（避免误伤），任一 `200` 即视为令牌有效走原流程。状态端点本就带同一 Bearer 令牌，故零新增网络请求。
+- **到期预警**：`wbcredential.token_expiry(cfg)` 读登录态 `auth.expiresAt`（毫秒，不解密令牌、不发网络请求）；`payload._warn_token_expiry(cfg)` 在剩余 ≤1 天时弹窗提醒启动客户端刷新登录态并记 `token expiry warning`，进程内以 `_EXPIRY_WARNED` 去重只提醒一次。已过期（`expiresAt` 早于当前）不弹到期预警——仍由 `route_a()` 的过期硬阻断拦截。到期预警置于 `get_identity()` 之前调用，凭证解密失败时也能先行提醒。
+- **二者互补**：服务端实测为准（是否真被接受），到期预警提前提示。均针对**登录令牌**；设备令牌服务端为事后判定、无同步校验端点（asar 的 `verifyToken` 为 HTTP bearer 中间件、`checkToken` 为 MIME 解析，均无关），仍以活动日历入账为唯一准绳。
+- **验证**：隔离探针 8/8 PASS（全 401/403→token_invalid 零签到 POST / code=0 不参与 / 401+200 视为有效 / 全 200 正常签到 / 已签幂等 / 剩 0.5 天弹窗且去重 / 28 天不弹 / 已过期不弹）；真实源码态冒烟已签场景 `RESULT: already` 零回归。py_compile rc=0。
+- 两处均外置 `.py`，**无需重打包**；README 版本号、双检测特性段、排障表 `token_invalid` 条、已知边界同步。
+
 ## [3.4.1] — 2026-11-27
 
 **启动闪现命令提示符窗口治本（阁主报障）**
