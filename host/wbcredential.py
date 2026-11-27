@@ -145,7 +145,14 @@ def _save_key(key_id, key):
         pass
 
 
-def _scan_processes(key_id):
+def _iter_process_regions():
+    """遍历 WorkBuddy 进程的可读已提交内存块，逐块 yield 字节串。
+
+    进程枚举 / OpenProcess / VirtualQueryEx 遍历 / 区域过滤 / _read 收敛于此，
+    两条提取通道（at-rest 密钥、内存 JWT）只保留各自的匹配逻辑。过滤条件
+    与句柄生命周期（finally 关闭，含提前 return）唯一真相源在此，避免两处
+    漂移（曾因打桩 addr==0 误判付出排障成本）。
+    """
     for pid in _pids():
         h = _k.OpenProcess(0x0410, False, pid)
         if not h:
@@ -166,16 +173,21 @@ def _scan_processes(key_id):
                         and 0 < size <= 32 * 1024 * 1024):
                     data = _read(h, base, min(size, 32 * 1024 * 1024))
                     total += len(data)
-                    for m in _B64_32.finditer(data):
-                        key = _key_from_payload(m.group())
-                        if key and _key_id(key) == key_id:
-                            return key
+                    yield data
                 nxt = base + size
                 if nxt <= addr:
                     break
                 addr = nxt
         finally:
             _k.CloseHandle(h)
+
+
+def _scan_processes(key_id):
+    for data in _iter_process_regions():
+        for m in _B64_32.finditer(data):
+            key = _key_from_payload(m.group())
+            if key and _key_id(key) == key_id:
+                return key
     return None
 
 
@@ -266,39 +278,14 @@ def _extract_memory_jwt():
     仅在主路遭遇协议漂移错误时调用——完全绕开加密信封协议。候选须过
     JWT 结构解析 + 未过期 exp 校验；并存多版本时取 exp 最大者（取证：
     内存同时有 4 个不同 exp 的令牌，取首个命中会拿到旧令牌）。令牌不落盘、
-    不写日志（只由 payload 记来源与长度）。
+    不写日志（只由 payload 记来源与长度）。内存块遍历见 _iter_process_regions。
     """
     best = None
-    for pid in _pids():
-        h = _k.OpenProcess(0x0410, False, pid)
-        if not h:
-            continue
-        total = 0
-        try:
-            addr = 0
-            mbi = _MBI()
-            while addr < 0x7FFFFFFFFFFF and total < _MAX_SCAN:
-                if _k.VirtualQueryEx(h, ctypes.c_void_p(addr),
-                                     ctypes.cast(ctypes.byref(mbi), ctypes.c_void_p),
-                                     ctypes.sizeof(mbi)) == 0:
-                    break
-                size = mbi.Size or 0x1000
-                base = mbi.Base or 0
-                prot = mbi.Protect or 0
-                if (mbi.State == 0x1000 and prot and not (prot & 0x101)
-                        and 0 < size <= 32 * 1024 * 1024):
-                    data = _read(h, base, min(size, 32 * 1024 * 1024))
-                    total += len(data)
-                    for m in _JWT_RE.finditer(data):
-                        parsed = _parse_jwt_candidate(m.group())
-                        if parsed and (best is None or parsed[0] > best[0]):
-                            best = parsed
-                nxt = base + size
-                if nxt <= addr:
-                    break
-                addr = nxt
-        finally:
-            _k.CloseHandle(h)
+    for data in _iter_process_regions():
+        for m in _JWT_RE.finditer(data):
+            parsed = _parse_jwt_candidate(m.group())
+            if parsed and (best is None or parsed[0] > best[0]):
+                best = parsed
     return best[1] if best else None
 
 

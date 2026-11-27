@@ -32,8 +32,7 @@ G.SelectObject.argtypes = [w.HDC, w.HANDLE]
 G.GetTextExtentPoint32W.argtypes = [w.HDC, w.LPCWSTR, ctypes.c_int,
                                     ctypes.POINTER(w.POINT)]
 U.ClientToScreen.argtypes = [w.HWND, ctypes.POINTER(w.POINT)]
-U.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int,
-                           ctypes.c_int, ctypes.c_int, w.UINT]
+# SetWindowPos / SendMessageW 的签名在 main() 集中声明（restype + argtypes）
 
 
 class WNDCLASSEXW(ctypes.Structure):
@@ -367,8 +366,22 @@ def _mirror_grow(key, txt):
     return txt
 
 
+def _marker_split(text):
+    """返回 daemon started 所在行的行首下标；无 marker 返回 -1。
+
+    LOG_MARKER 是行内子串，直接按 rfind 切会把该行时间戳前缀（无换行）
+    留到历史页——下一轮前缀再拼上来即形成「两个时间戳同行」的怪行，
+    且当前页首行会丢掉时间戳。按整行切分保证两页都以完整行为边界。
+    """
+    idx = text.rfind(LOG_MARKER)
+    if idx == -1:
+        return -1
+    nl = text.rfind("\n", 0, idx)
+    return nl + 1
+
+
 def _log_load_full():
-    """全量加载（首次/日志轮转时）：当前页置空起步，历史页取最后一个 daemon started 之前的内容。
+    """全量加载（首次/日志轮转时）：当前页置空起步，历史页取最后一个 daemon started 所在行之前的内容。
 
     首载发生在 payload 线程写出本轮 daemon started 之前（_create_gui 先于
     payload 线程启动）——若按最后一个 marker 切当前页，必然命中上一轮残留，
@@ -390,7 +403,7 @@ def _log_load_full():
     except OSError:
         _state["log_pos"] = 0
     text = _crlf(data.decode("utf-8", "replace"))
-    idx = text.rfind(LOG_MARKER)
+    idx = _marker_split(text)
     _state["cur_text"] = ""  # 首载空白：当前页只接收本轮启动后的流式日志
     _state["hist_text"] = text[:idx] if idx != -1 else ""
 
@@ -421,7 +434,7 @@ def _log_append():
     _state["log_pos"] = size
     text, carry = _safe_decode(_state["log_carry"] + new)
     _state["log_carry"] = carry
-    idx = text.rfind(LOG_MARKER)
+    idx = _marker_split(text)
     if idx != -1:
         hist_add = _mirror_grow("hist_text", _crlf(text[:idx]))
         if hist_add is None:
@@ -838,64 +851,59 @@ def _edit_text(edit):
     return tb.value
 
 
-def _find_next():
-    """向下查找：从选区末尾起匹配（不区分大小写），到末尾回绕开头。"""
+def _find(direction):
+    """查找共用实现：direction>0 向下（从选区末尾，末尾回绕开头），
+    direction<0 向上（从选区起点，开头回绕末尾）；不区分大小写。
+    两向的取端点、匹配方向、回绕与日志标签由 direction 统一推导，
+    命中提示 / 选区高亮 / 滚动 / 日志样板只维护一份。
+    """
+    tag = "find-next" if direction > 0 else "find-prev"
     edit = _visible_edit()
     needle = _search_text()
-    _host_log("find-next enter edit=%r needle=%r"
-              % (edit, needle[:20]))
+    if direction > 0:
+        _host_log("find-next enter edit=%r needle=%r"
+                  % (edit, needle[:20]))
     if not edit or not needle:
         return
     hay = _edit_text(edit).lower()
     if not hay:
         _hint_show("无内容")
         return
-    e0 = ctypes.c_int()
-    U.SendMessageW(edit, EM_GETSEL, 0, ctypes.addressof(e0))
+    pos = ctypes.c_int()
+    if direction > 0:
+        U.SendMessageW(edit, EM_GETSEL, 0, ctypes.addressof(pos))
+    else:
+        U.SendMessageW(edit, EM_GETSEL, ctypes.addressof(pos), 0)
     ned = needle.lower()
-    hit = hay.find(ned, e0.value)
-    if hit == -1:
-        hit = hay.find(ned)  # 回绕：从开头再找一次
+    if direction > 0:
+        hit = hay.find(ned, pos.value)
+        if hit == -1:
+            hit = hay.find(ned)  # 回绕：从开头再找一次
+    else:
+        hit = hay.rfind(ned, 0, pos.value)
+        if hit == -1:
+            hit = hay.rfind(ned)  # 回绕：从末尾再找一次
     if hit == -1:
         _hint_show("未找到")
-        _host_log("find-next q=%r miss" % needle[:20])
+        _host_log("%s q=%r miss" % (tag, needle[:20]))
         return
     _state["miss_at"] = 0.0
     if _state["hint"]:
         U.SetWindowTextW(_state["hint"], "")
     U.SendMessageW(edit, EM_SETSEL, hit, hit + len(ned))
     _scroll_caret(edit)
-    _host_log("find-next q=%r hit=%d from=%d len=%d"
-              % (needle[:20], hit, e0.value, len(hay)))
+    _host_log("%s q=%r hit=%d from=%d len=%d"
+              % (tag, needle[:20], hit, pos.value, len(hay)))
+
+
+def _find_next():
+    """向下查找：从选区末尾起匹配（不区分大小写），到末尾回绕开头。"""
+    _find(1)
 
 
 def _find_prev():
     """向上查找：从选区起点向前匹配（不区分大小写），到开头回绕末尾。"""
-    edit = _visible_edit()
-    needle = _search_text()
-    if not edit or not needle:
-        return
-    hay = _edit_text(edit).lower()
-    if not hay:
-        _hint_show("无内容")
-        return
-    s0 = ctypes.c_int()
-    U.SendMessageW(edit, EM_GETSEL, ctypes.addressof(s0), 0)
-    ned = needle.lower()
-    hit = hay.rfind(ned, 0, s0.value)
-    if hit == -1:
-        hit = hay.rfind(ned)  # 回绕：从末尾再找一次
-    if hit == -1:
-        _hint_show("未找到")
-        _host_log("find-prev q=%r miss" % needle[:20])
-        return
-    _state["miss_at"] = 0.0
-    if _state["hint"]:
-        U.SetWindowTextW(_state["hint"], "")
-    U.SendMessageW(edit, EM_SETSEL, hit, hit + len(ned))
-    _scroll_caret(edit)
-    _host_log("find-prev q=%r hit=%d from=%d len=%d"
-              % (needle[:20], hit, s0.value, len(hay)))
+    _find(-1)
 
 
 @WNDPROC
@@ -1174,8 +1182,6 @@ def main():
     U.MoveWindow.restype = w.BOOL
     U.MoveWindow.argtypes = [w.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                              ctypes.c_int, w.BOOL]
-    U.SendMessageW.restype = LRESULT
-    U.SendMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
     U.SetWindowLongPtrW.restype = ctypes.c_ssize_t
     U.SetWindowLongPtrW.argtypes = [w.HWND, ctypes.c_int, ctypes.c_ssize_t]
     U.CallWindowProcW.restype = LRESULT

@@ -257,6 +257,14 @@ def _announce_success(text):
             log("success balloon ERROR %s: %s" % (type(e).__name__, e))
 
 
+def _resp_data(text):
+    """从响应体取 data 对象；解析失败或缺失一律视为空对象（收敛预检/复核两处）。"""
+    try:
+        return (json.loads(text) or {}).get("data") or {}
+    except Exception:
+        return {}
+
+
 def _token_expiry_info(cfg):
     """读取登录令牌到期信息，返回 (到期时刻文本, 剩余天数)；无有效期返回 (None, None)。
 
@@ -294,9 +302,9 @@ def _warn_token_expiry(deadline, remain):
                % (deadline, remain), "token expiry")
 
 
-def run_once():
-    with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
-        cfg = json.load(f)
+def run_once(cfg, identity):
+    """单次签到：cfg 与 identity 由 _run 统一读取一次后注入（#2+#5 收敛）。"""
+    token, uid, domain = identity
     deadline, remain = _token_expiry_info(cfg)
     if deadline:
         log("login token expiry: %s (%.2f days remaining)"
@@ -304,7 +312,6 @@ def run_once():
     else:
         log("login token expiry: unavailable")
     _warn_token_expiry(deadline, remain)
-    token, uid, domain = wbcredential.get_identity()
     log("identity source: %s" % wbcredential._LAST_IDENTITY_SOURCE)
     base = (cfg.get("api_base") or "").rstrip("/")
     headers = checkin_headers(cfg, device_token(cfg))
@@ -325,10 +332,7 @@ def run_once():
         if code != 200:
             continue
         auth_accepted = True
-        try:
-            data = (json.loads(text) or {}).get("data") or {}
-        except Exception:
-            data = {}
+        data = _resp_data(text)
         if data.get("active") is False:
             return "inactive"
         if data.get("today_checked_in") is True:
@@ -355,14 +359,15 @@ def run_once():
     return "error"
 
 
-def verify_checkin(cfg):
+def verify_checkin(cfg, identity):
     """复核签到活动日历：今日是否真实入账。
 
     客户端升级后服务端按设备令牌"当场受理、事后判定"，直发返回 200
     不代表入日历（21/22 缺卡成因）。缺卡间隔重试一次再判定，宁可迟报
     不漏报；checkin-status 为假状态，仅 activity-status 可作真源。
+    identity 由 _run 注入，与签到同一次凭证，避免重复取凭证漂移。
     """
-    token, uid, domain = wbcredential.get_identity()
+    token, uid, domain = identity
     base = (cfg.get("api_base") or "").rstrip("/")
     today = datetime.date.today().isoformat()
     for attempt in (1, 2):
@@ -371,10 +376,7 @@ def verify_checkin(cfg):
                               cfg.get("auth_headers"))
             if code != 200:
                 continue
-            try:
-                data = (json.loads(text) or {}).get("data") or {}
-            except Exception:
-                data = {}
+            data = _resp_data(text)
             if (data.get("today_checked_in") is True
                     or today in (data.get("checkin_dates") or [])):
                 return True
@@ -396,13 +398,17 @@ def next_run_at():
         hour=hour, minute=minute, second=0, microsecond=0)
 
 
-def _retry_network():
+def _retry_network(cfg):
     """网络类失败（run_once 归为 error）的当日有限重试。
 
     间隔 = 10min * 重试次数（10/20/.../60 分钟，累计约 3.5h），与阁主
     2026-11-25 裁定一致。等待将跨过下一定时点时提前让位——定时触发
     会带状态预检重新尝试，等价于重试。全部失败发置顶告警；阁主点掉
     弹窗后主循环恢复，next_run_at() 已过即自动补签。
+
+    每次重试重新取凭证（间隔 10~60 分钟，期间客户端可能刷新登录态），
+    与原 run_once 自取凭证语义一致；仅同一轮内的 run_once↔verify 复用
+    _run 注入的凭证（#2 收敛范围）。
     """
     for attempt in range(1, RETRY_MAX + 1):
         wait = 10 * 60 * attempt
@@ -414,7 +420,8 @@ def _retry_network():
             return None
         time.sleep(wait)
         try:
-            result = run_once()
+            identity = wbcredential.get_identity()
+            result = run_once(cfg, identity)
         except Exception as e:
             log("retry %d ERROR %s: %s" % (attempt, type(e).__name__, e))
             continue
@@ -429,7 +436,10 @@ def _retry_network():
 
 def _run(trigger):
     try:
-        result = run_once()
+        with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+        identity = wbcredential.get_identity()
+        result = run_once(cfg, identity)
         log("%s trigger -> %s" % (trigger, result))
         if result == "token_invalid":
             # 服务端已明确拒签（登录令牌失效），重试与复核都无意义——
@@ -440,12 +450,9 @@ def _run(trigger):
                    "刷新登录态后重启本程序。", "token invalid")
             return
         if result == "error":
-            result = _retry_network()
+            result = _retry_network(cfg)
         if result in ("ok", "already (server confirmed)"):
-            with open(CONFIG_FILE, "r",
-                      encoding="utf-8-sig") as f:
-                cfg = json.load(f)
-            if verify_checkin(cfg):
+            if verify_checkin(cfg, identity):
                 log("verify -> ok (in activity calendar)")
             else:
                 log("verify -> MISSING from activity calendar")
