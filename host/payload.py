@@ -187,7 +187,8 @@ def device_token(cfg):
     ) % (addon, cid, name, ver)
     try:
         r = subprocess.run(["node", "-e", script], capture_output=True,
-                           text=True, timeout=30)
+                           text=True, timeout=30,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
         token = r.stdout.strip().splitlines()[-1] if r.returncode == 0 else ""
         return token if token.startswith("v3:") else None
     except Exception:

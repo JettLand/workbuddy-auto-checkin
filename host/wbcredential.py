@@ -53,7 +53,8 @@ _MAX_SCAN = 900 * 1024 * 1024
 
 def _pids():
     out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True,
+                         creationflags=subprocess.CREATE_NO_WINDOW).stdout
     found = []
     for line in out.splitlines():
         if "WorkBuddy.exe" in line:

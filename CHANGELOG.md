@@ -4,6 +4,14 @@
 
 ---
 
+## [3.4.1] — 2026-11-27
+
+**启动闪现命令提示符窗口治本（阁主报障）**
+
+- 阁主报「每次启动程序先弹一个命令提示符窗口（约 1 秒后自动关闭）」。首轮取证排除 exe 子系统（PE `Subsystem=2` 即 GUI）、自启动包装（Run 值直指 exe）、包装脚本；首个探针只枚举 `ConsoleWindowClass` 漏检（Windows 11 实际类名 `CASCADIA_HOSTING_WINDOW_CLASS`），被反证推翻后重做严谨探针：无控制台宿主以 `stdout=PIPE` 启动 `node` 时 15/15 帧均出现 Terminal 窗口，带 `CREATE_NO_WINDOW` 后该类窗口消失，真机定案。
+- 治本：`payload.device_token()` 的 `subprocess.run(["node", ...])` 与 `wbcredential._pids()` 的 `subprocess.run(["tasklist", ...])` 均加 `creationflags=subprocess.CREATE_NO_WINDOW`——GUI 进程启动控制台子系统子进程不再弹出控制台窗口，stdout 捕获不受影响。两处均外置 `.py`，**无需重打包**。
+- 验证：py_compile rc=0；源码态冒烟设备令牌 len=703、`tasklist` 扫描 14 个进程正常；README 特性段与版本同步。
+
 ## [3.4.0] — 2026-11-26
 
 **方案 B 配置化入口：改名/增删外置脚本零重打包（阁主裁定）**
