@@ -18,7 +18,8 @@ CONFIG_FILE = os.environ.get("WB_CHECKIN_CONFIG") or os.path.join(
 LOG = os.path.join(BASE, "logs", "daemon.log")
 SCHEDULE = [(0, 5)]
 RETRY_MAX = 6  # 网络类失败当日重试上限；间隔 10min*次数（累计约 3.5h）
-_EXPIRY_WARNED = False  # 登录令牌到期预警的进程内去重标记
+_EXPIRY_WARNED = False  # 登录令牌到期弹窗的进程内去重标记
+_EXPIRY_LOG_WARNED = False  # 登录令牌到期日志警告的进程内去重标记
 
 
 def log(msg):
@@ -27,6 +28,22 @@ def log(msg):
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
     print(line, flush=True)
+
+
+def _alert(title, msg, tag):
+    """统一告警通道：托盘气泡 + 置顶模态窗（通道由 tray_host 注入）。
+
+    所有告警共用此入口，避免各处重复 globals().get / try-except 样板；
+    通道缺失或异常一律降级为日志，绝不中断签到流程。tag 仅用于日志归类。
+    """
+    notify = globals().get("_tray_notify")
+    if not notify:
+        return
+    try:
+        notify(title, msg)
+        log("alert -> tray balloon sent (%s)" % tag)
+    except Exception as e:
+        log("alert ERROR %s: %s" % (type(e).__name__, e))
 
 
 def _registry_roots():
@@ -150,14 +167,9 @@ def _turing_params(cfg):
                 str(cfg.get("turing_product_name") or "WorkBuddy"),
                 str(cfg.get("turing_product_version") or "5.11.3"))
     log("turing discovery failed entirely")
-    notify = globals().get("_tray_notify")
-    if notify:
-        try:
-            notify("WorkBuddy 自动签到",
-                   "图灵盾参数自动发现失败，今日签到可能不计入活动日历，"
-                   "请检查 WorkBuddy 客户端是否已安装。")
-        except Exception as e:
-            log("turing alert ERROR %s: %s" % (type(e).__name__, e))
+    _alert("WorkBuddy 自动签到",
+           "图灵盾参数自动发现失败，今日签到可能不计入活动日历，"
+           "请检查 WorkBuddy 客户端是否已安装。", "turing")
     return None
 
 
@@ -245,40 +257,53 @@ def _announce_success(text):
             log("success balloon ERROR %s: %s" % (type(e).__name__, e))
 
 
-def _warn_token_expiry(cfg):
-    """登录令牌到期预警：剩余 ≤1 天时弹窗提醒（进程内只提醒一次）。
+def _token_expiry_info(cfg):
+    """读取登录令牌到期信息，返回 (到期时刻文本, 剩余天数)；无有效期返回 (None, None)。
 
     有效期取自登录态明文 expiresAt（毫秒时间戳），非服务端检测——服务端
-    实际是否认可另由 checkin-activity-status 的 401/403 判定。客户端有
-    refreshToken 自动续期，临近到期多为客户端长期未运行，提醒用户启动
-    一次客户端刷新登录态。
+    实际是否认可另由 checkin-activity-status 的 401/403 判定。
     """
-    global _EXPIRY_WARNED
-    if _EXPIRY_WARNED:
-        return
     exp = wbcredential.token_expiry(cfg)
     if not exp:
-        return
+        return None, None
     remain = (exp / 1000 - time.time()) / 86400
-    if remain < 0 or remain > 1:
+    deadline = datetime.datetime.fromtimestamp(
+        exp / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    return deadline, remain
+
+
+def _warn_token_expiry(deadline, remain):
+    """登录令牌到期双层预警：≤7 天日志警告、≤1 天弹窗告警，各自进程内只提醒一次。
+
+    客户端有 refreshToken 自动续期，临近到期多为客户端长期未运行，提醒
+    用户启动一次客户端刷新登录态。已过期（remain<0）由 route_a 硬阻断，
+    此处不弹窗——避免与凭证失败报错重复。
+    """
+    global _EXPIRY_WARNED, _EXPIRY_LOG_WARNED
+    if remain is None or remain < 0:
         return
-    _EXPIRY_WARNED = True
-    log("token expiry warning: %.2f days remaining" % remain)
-    notify = globals().get("_tray_notify")
-    if notify:
-        try:
-            notify("WorkBuddy 自动签到",
-                   "登录令牌将在 1 天内到期（剩余 %.1f 天），签到可能失败。"
-                   "请启动并登录一次 WorkBuddy 客户端以刷新登录态。" % remain)
-            log("alert -> tray balloon sent (token expiry)")
-        except Exception as e:
-            log("token expiry alert ERROR %s: %s" % (type(e).__name__, e))
+    if remain <= 7 and not _EXPIRY_LOG_WARNED:
+        _EXPIRY_LOG_WARNED = True
+        log("token expiry warning: expires %s, %.2f days remaining (<=7d)"
+            % (deadline, remain))
+    if remain <= 1 and not _EXPIRY_WARNED:
+        _EXPIRY_WARNED = True
+        _alert("WorkBuddy 自动签到",
+               "登录令牌将在 1 天内到期（%s，剩余 %.1f 天），签到可能失败。"
+               "请启动并登录一次 WorkBuddy 客户端以刷新登录态。"
+               % (deadline, remain), "token expiry")
 
 
 def run_once():
     with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
         cfg = json.load(f)
-    _warn_token_expiry(cfg)
+    deadline, remain = _token_expiry_info(cfg)
+    if deadline:
+        log("login token expiry: %s (%.2f days remaining)"
+            % (deadline, remain))
+    else:
+        log("login token expiry: unavailable")
+    _warn_token_expiry(deadline, remain)
     token, uid, domain = wbcredential.get_identity()
     base = (cfg.get("api_base") or "").rstrip("/")
     headers = checkin_headers(cfg, device_token(cfg))
@@ -395,15 +420,9 @@ def _retry_network():
         log("retry %d -> %s" % (attempt, result))
         if result != "error":
             return result
-    notify = globals().get("_tray_notify")
-    if notify:
-        try:
-            notify("WorkBuddy 自动签到",
-                   "网络异常导致今日签到失败（已重试 %d 次），请检查网络后"
-                   "重启本程序补签，或打开客户端使用补签卡。" % RETRY_MAX)
-            log("alert -> tray balloon sent (network)")
-        except Exception as e:
-            log("alert ERROR %s: %s" % (type(e).__name__, e))
+    _alert("WorkBuddy 自动签到",
+           "网络异常导致今日签到失败（已重试 %d 次），请检查网络后"
+           "重启本程序补签，或打开客户端使用补签卡。" % RETRY_MAX, "network")
     return "error"
 
 
@@ -414,16 +433,10 @@ def _run(trigger):
         if result == "token_invalid":
             # 服务端已明确拒签（登录令牌失效），重试与复核都无意义——
             # 直接弹窗告知刷新登录态；模态窗阻塞 payload 线程无碍。
-            notify = globals().get("_tray_notify")
-            if notify:
-                try:
-                    notify("WorkBuddy 自动签到",
-                           "登录令牌在服务端已失效（签到状态查询返回 401/403），"
-                           "今日签到未发出。请启动并登录一次 WorkBuddy 客户端"
-                           "刷新登录态后重启本程序。")
-                    log("alert -> tray balloon sent (token invalid)")
-                except Exception as e:
-                    log("alert ERROR %s: %s" % (type(e).__name__, e))
+            _alert("WorkBuddy 自动签到",
+                   "登录令牌在服务端已失效（签到状态查询返回 401/403），"
+                   "今日签到未发出。请启动并登录一次 WorkBuddy 客户端"
+                   "刷新登录态后重启本程序。", "token invalid")
             return
         if result == "error":
             result = _retry_network()
@@ -435,15 +448,9 @@ def _run(trigger):
                 log("verify -> ok (in activity calendar)")
             else:
                 log("verify -> MISSING from activity calendar")
-                notify = globals().get("_tray_notify")
-                if notify:
-                    try:
-                        notify("WorkBuddy 自动签到",
-                               "今日签到可能未生效（活动日历缺卡），"
-                               "请打开客户端确认或使用补签卡。")
-                        log("alert -> tray balloon sent")
-                    except Exception as e:
-                        log("alert ERROR %s: %s" % (type(e).__name__, e))
+                _alert("WorkBuddy 自动签到",
+                       "今日签到可能未生效（活动日历缺卡），"
+                       "请打开客户端确认或使用补签卡。", "verify missing")
     except Exception as e:
         log("%s trigger ERROR %s: %s" % (trigger, type(e).__name__, e))
 
